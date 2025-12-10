@@ -1,0 +1,28 @@
+# 交易配置
+trading:
+  symbol: "BTC/USDT:USDT"  # 交易对，格式：基础货币/报价货币:结算货币
+  side: "long"  # 交易方向：long(做多) 或 short(做空)
+  leverage: 10  # 杠杆倍数
+
+# 马丁格尔策略参数
+martingale:
+  initial_position: 200  # 初始仓位（USDT）
+  multiplier: 2.0  # 加仓倍数
+  max_additions: 5  # 最大加仓次数
+
+# 触发条件
+trigger:
+  price_drop_percent: 5.0  # 价格下跌百分比阈值（触发抄底）
+  start_immediately: true  # 是否立即开始（true: 启动时立即开仓，false: 等待触发条件）
+
+# 风险管理
+risk:
+  stop_loss_percent: 10.0  # 止损百分比（相对于开仓价格）
+  take_profit_percent: 15.0  # 止盈百分比（相对于开仓价格）
+  max_loss_percent: 20.0  # 最大亏损百分比（总资金）
+
+# 监控设置
+monitoring:
+  check_interval: 5  # 价格检查间隔（秒）
+  price_precision: 2  # 价格精度（小数位数）
+
