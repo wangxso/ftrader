@@ -52,4 +52,12 @@ export const strategiesApi = {
     const response = await apiClient.get(`/strategies/${id}/runs`)
     return response.data
   },
+
+  // 获取策略价格历史
+  getPriceHistory: async (id: number, timeframe = '1m', limit = 100): Promise<any[]> => {
+    const response = await apiClient.get(`/strategies/${id}/price-history`, {
+      params: { timeframe, limit }
+    })
+    return response.data
+  },
 }

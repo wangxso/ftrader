@@ -48,9 +48,37 @@
     <el-dialog
       v-model="showCreateDialog"
       :title="editingStrategy ? '编辑策略' : '创建策略'"
-      width="800px"
+      width="900px"
     >
       <el-form :model="form" label-width="120px">
+        <!-- 模板选择（仅创建时显示） -->
+        <el-form-item v-if="!editingStrategy" label="选择模板">
+          <el-select
+            v-model="selectedTemplateId"
+            placeholder="选择策略模板（可选）"
+            clearable
+            @change="onTemplateChange"
+            style="width: 100%"
+          >
+            <el-option-group
+              v-for="group in templateGroups"
+              :key="group.category"
+              :label="group.category"
+            >
+              <el-option
+                v-for="template in group.templates"
+                :key="template.id"
+                :label="template.name"
+                :value="template.id"
+              >
+                <div>
+                  <div style="font-weight: bold">{{ template.name }}</div>
+                  <div style="font-size: 12px; color: #909399">{{ template.description }}</div>
+                </div>
+              </el-option>
+            </el-option-group>
+          </el-select>
+        </el-form-item>
         <el-form-item label="策略名称">
           <el-input v-model="form.name" />
         </el-form-item>
@@ -68,7 +96,7 @@
             v-model="form.config_yaml"
             type="textarea"
             :rows="15"
-            placeholder="请输入YAML配置"
+            placeholder="请输入YAML配置或从模板选择"
           />
         </el-form-item>
       </el-form>
@@ -81,24 +109,43 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { strategiesApi } from '../api/strategies'
+import { templatesApi } from '../api/templates'
 import { wsClient } from '../api/websocket'
 import type { Strategy, StrategyCreate, StrategyUpdate } from '../types'
+import type { TemplateInfo, TemplateDetail } from '../api/templates'
 
 const router = useRouter()
 
 const strategies = ref<Strategy[]>([])
 const showCreateDialog = ref(false)
 const editingStrategy = ref<Strategy | null>(null)
+const templates = ref<TemplateInfo[]>([])
+const selectedTemplateId = ref<string>('')
 
 const form = ref<StrategyCreate>({
   name: '',
   description: '',
   strategy_type: 'config',
   config_yaml: '',
+})
+
+// 按分类分组模板
+const templateGroups = computed(() => {
+  const groups: Record<string, TemplateInfo[]> = {}
+  templates.value.forEach(template => {
+    if (!groups[template.category]) {
+      groups[template.category] = []
+    }
+    groups[template.category].push(template)
+  })
+  return Object.keys(groups).map(category => ({
+    category,
+    templates: groups[category]
+  }))
 })
 
 const getStatusType = (status: string) => {
@@ -130,6 +177,30 @@ const loadStrategies = async () => {
   }
 }
 
+const loadTemplates = async () => {
+  try {
+    templates.value = await templatesApi.getAll()
+  } catch (error) {
+    console.error('加载模板列表失败:', error)
+  }
+}
+
+const onTemplateChange = async (templateId: string) => {
+  if (!templateId) {
+    return
+  }
+  
+  try {
+    const template = await templatesApi.getById(templateId)
+    form.value.name = template.name
+    form.value.description = template.description
+    form.value.config_yaml = template.config_yaml
+  } catch (error) {
+    ElMessage.error('加载模板失败')
+    console.error(error)
+  }
+}
+
 const viewStrategy = (id: number) => {
   router.push(`/strategies/${id}`)
 }
@@ -154,15 +225,22 @@ const stopStrategy = async (id: number) => {
   }
 }
 
-const editStrategy = (strategy: Strategy) => {
+const editStrategy = async (strategy: Strategy) => {
   editingStrategy.value = strategy
-  form.value = {
-    name: strategy.name,
-    description: strategy.description || '',
-    strategy_type: strategy.strategy_type,
-    config_yaml: '', // 需要从API获取完整配置
+  try {
+    // 从API获取完整的策略信息，包括config_yaml
+    const fullStrategy = await strategiesApi.getById(strategy.id)
+    form.value = {
+      name: fullStrategy.name,
+      description: fullStrategy.description || '',
+      strategy_type: fullStrategy.strategy_type,
+      config_yaml: fullStrategy.config_yaml || '',
+    }
+    showCreateDialog.value = true
+  } catch (error: any) {
+    ElMessage.error('加载策略配置失败')
+    console.error(error)
   }
-  showCreateDialog.value = true
 }
 
 const deleteStrategy = async (id: number) => {
@@ -191,6 +269,7 @@ const saveStrategy = async () => {
     }
     showCreateDialog.value = false
     editingStrategy.value = null
+    selectedTemplateId.value = ''
     form.value = {
       name: '',
       description: '',
@@ -205,6 +284,7 @@ const saveStrategy = async () => {
 
 onMounted(() => {
   loadStrategies()
+  loadTemplates()
   
   // 监听WebSocket消息
   wsClient.on('strategy_status', () => {

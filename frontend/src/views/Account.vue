@@ -21,7 +21,7 @@
         </el-card>
       </el-col>
       <el-col :span="16">
-        <el-card>
+        <el-card v-loading="chartLoading">
           <template #header>
             <span>收益曲线</span>
           </template>
@@ -99,6 +99,7 @@ const positions = ref<Position[]>([])
 const trades = ref<Trade[]>([])
 const profitChartRef = ref<HTMLDivElement>()
 let profitChart: echarts.ECharts | null = null
+const chartLoading = ref(false)
 
 const formatCurrency = (value: number) => {
   return new Intl.NumberFormat('zh-CN', {
@@ -154,12 +155,40 @@ const initProfitChart = async () => {
   profitChart.setOption(option)
 }
 
+const loading = ref(true)
+
 const loadData = async () => {
   try {
-    balance.value = await accountApi.getBalance()
-    positions.value = await accountApi.getPositions()
-    trades.value = await accountApi.getHistory(undefined, 0, 100)
+    loading.value = true
     
+    // 并行加载主要数据
+    const [balanceData, positionsData, tradesData] = await Promise.all([
+      accountApi.getBalance(),
+      accountApi.getPositions(),
+      accountApi.getHistory(undefined, 0, 100)
+    ])
+    
+    balance.value = balanceData
+    positions.value = positionsData
+    trades.value = tradesData
+    
+    // 图表数据异步加载，显示在图表card内的loading
+    updateChartAsync()
+  } catch (error: any) {
+    console.error('加载数据失败:', error)
+    // 如果API密钥未配置，显示默认值而不是错误
+    if (error.response?.status === 500 && error.response?.data?.detail?.includes('API密钥')) {
+      console.warn('API密钥未配置，显示默认值')
+      balance.value = { total: 0, free: 0, used: 0 }
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const updateChartAsync = async () => {
+  chartLoading.value = true
+  try {
     await nextTick()
     if (profitChart) {
       const snapshots = await accountApi.getSnapshots(24)
@@ -177,13 +206,10 @@ const loadData = async () => {
         ],
       })
     }
-  } catch (error: any) {
-    console.error('加载数据失败:', error)
-    // 如果API密钥未配置，显示默认值而不是错误
-    if (error.response?.status === 500 && error.response?.data?.detail?.includes('API密钥')) {
-      console.warn('API密钥未配置，显示默认值')
-      balance.value = { total: 0, free: 0, used: 0 }
-    }
+  } catch (error) {
+    console.warn('加载快照数据失败:', error)
+  } finally {
+    chartLoading.value = false
   }
 }
 

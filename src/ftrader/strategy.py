@@ -241,9 +241,15 @@ class MartingaleStrategy:
             if has_position:
                 # 有持仓：检查止损止盈
                 balance = self.exchange.get_balance()
+                # 如果余额获取失败，使用None，避免误判
+                balance_total = balance['total'] if balance else None
                 should_close, reason = self.risk_manager.should_close_position(
-                    current_price, balance['total'], self.position_side
+                    current_price, balance_total, self.position_side
                 )
+                
+                # 如果余额获取失败，记录警告但继续运行
+                if balance is None:
+                    logger.warning("余额获取失败，跳过风险检查，继续运行策略")
                 
                 if should_close:
                     logger.warning(f"触发平仓条件: {reason}")

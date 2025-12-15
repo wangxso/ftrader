@@ -3,6 +3,7 @@ import Dashboard from '../views/Dashboard.vue'
 import Strategies from '../views/Strategies.vue'
 import StrategyDetail from '../views/StrategyDetail.vue'
 import Account from '../views/Account.vue'
+import Backtest from '../views/Backtest.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -30,6 +31,11 @@ const router = createRouter({
       path: '/account',
       name: 'Account',
       component: Account,
+    },
+    {
+      path: '/backtest',
+      name: 'Backtest',
+      component: Backtest,
     },
   ],
 })

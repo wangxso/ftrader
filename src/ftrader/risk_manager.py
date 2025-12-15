@@ -124,17 +124,31 @@ class RiskManager:
         
         return False
     
-    def check_max_loss(self, current_balance: float) -> bool:
+    def check_max_loss(self, current_balance: Optional[float]) -> bool:
         """
         检查是否超过最大亏损限制
         
         Args:
-            current_balance: 当前余额
+            current_balance: 当前余额，如果为None表示获取失败，跳过检查
             
         Returns:
             是否超过最大亏损
         """
+        # 如果余额获取失败（None），跳过检查，避免网络错误导致误判
+        if current_balance is None:
+            logger.warning("余额获取失败，跳过最大亏损检查")
+            return False
+        
         if self.initial_balance == 0:
+            return False
+        
+        # 如果当前余额为0，但初始余额不为0，可能是网络错误
+        # 只有在初始余额较大时才认为是真实亏损
+        if current_balance == 0.0 and self.initial_balance > 100:
+            logger.warning(
+                f"当前余额为0但初始余额为{self.initial_balance:.2f}，"
+                f"可能是网络错误，跳过最大亏损检查"
+            )
             return False
         
         loss = self.initial_balance - current_balance
@@ -151,14 +165,14 @@ class RiskManager:
         
         return False
     
-    def should_close_position(self, current_price: float, current_balance: float, 
+    def should_close_position(self, current_price: float, current_balance: Optional[float], 
                              side: str) -> Tuple[bool, str]:
         """
         判断是否应该平仓
         
         Args:
             current_price: 当前价格
-            current_balance: 当前余额
+            current_balance: 当前余额，如果为None表示获取失败
             side: 交易方向
             
         Returns:
@@ -172,13 +186,14 @@ class RiskManager:
         if self.check_take_profit(current_price, side):
             return True, "止盈"
         
-        # 检查最大亏损
-        if self.check_max_loss(current_balance):
-            return True, "最大亏损限制"
+        # 检查最大亏损（只有在余额获取成功时才检查）
+        if current_balance is not None:
+            if self.check_max_loss(current_balance):
+                return True, "最大亏损限制"
         
         return False, ""
     
-    def get_risk_status(self, current_price: float, current_balance: float, 
+    def get_risk_status(self, current_price: float, current_balance: Optional[float], 
                        side: str) -> Dict:
         """
         获取当前风险状态

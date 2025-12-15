@@ -68,6 +68,7 @@ martingale:
 trigger:
   price_drop_percent: 5.0  # 价格下跌百分比阈值（触发抄底）
   start_immediately: true  # 是否立即开始（true: 启动时立即开仓，false: 等待触发条件）
+  addition_cooldown: 60  # 加仓冷却时间（秒），防止频繁加仓，默认60秒
 
 # 风险管理
 risk:
@@ -235,3 +236,156 @@ monitoring:
 """
 )
 register_template(mean_reversion_template)
+
+
+# 做空马丁格尔策略模板
+martingale_short_template = StrategyTemplate(
+    id="martingale_short",
+    name="做空马丁格尔策略",
+    description="做空版本的马丁格尔策略，价格上涨时按倍数加仓",
+    category="加仓策略",
+    config_yaml="""# 交易配置
+trading:
+  symbol: "BTC/USDT:USDT"  # 交易对
+  side: "short"  # 交易方向：做空
+  leverage: 10  # 杠杆倍数
+
+# 马丁格尔策略参数
+martingale:
+  initial_position: 200  # 初始仓位（USDT）
+  multiplier: 2.0  # 加仓倍数
+  max_additions: 5  # 最大加仓次数
+
+# 触发条件
+trigger:
+  price_drop_percent: 5.0  # 价格上涨百分比阈值（做空时价格上涨触发）
+  start_immediately: true  # 是否立即开始
+  addition_cooldown: 60  # 加仓冷却时间（秒），防止频繁加仓
+
+# 风险管理
+risk:
+  stop_loss_percent: 10.0  # 止损百分比
+  take_profit_percent: 15.0  # 止盈百分比
+  max_loss_percent: 20.0  # 最大亏损百分比
+
+# 监控设置
+monitoring:
+  check_interval: 5  # 价格检查间隔（秒）
+  price_precision: 2  # 价格精度
+"""
+)
+register_template(martingale_short_template)
+
+
+# 保守型马丁格尔策略模板
+martingale_conservative_template = StrategyTemplate(
+    id="martingale_conservative",
+    name="保守型马丁格尔策略",
+    description="低风险版本的马丁格尔策略，较小的加仓倍数和更严格的止损",
+    category="加仓策略",
+    config_yaml="""# 交易配置
+trading:
+  symbol: "BTC/USDT:USDT"  # 交易对
+  side: "long"  # 交易方向
+  leverage: 5  # 杠杆倍数（较低）
+
+# 马丁格尔策略参数
+martingale:
+  initial_position: 100  # 初始仓位（USDT，较小）
+  multiplier: 1.5  # 加仓倍数（较小）
+  max_additions: 3  # 最大加仓次数（较少）
+
+# 触发条件
+trigger:
+  price_drop_percent: 3.0  # 价格下跌百分比阈值（较小）
+  start_immediately: true  # 是否立即开始
+
+# 风险管理
+risk:
+  stop_loss_percent: 5.0  # 止损百分比（较严格）
+  take_profit_percent: 10.0  # 止盈百分比
+  max_loss_percent: 10.0  # 最大亏损百分比（较严格）
+
+# 监控设置
+monitoring:
+  check_interval: 5  # 价格检查间隔（秒）
+  price_precision: 2  # 价格精度
+"""
+)
+register_template(martingale_conservative_template)
+
+
+# 激进型马丁格尔策略模板
+martingale_aggressive_template = StrategyTemplate(
+    id="martingale_aggressive",
+    name="激进型马丁格尔策略",
+    description="高风险高收益版本的马丁格尔策略，较大的加仓倍数",
+    category="加仓策略",
+    config_yaml="""# 交易配置
+trading:
+  symbol: "BTC/USDT:USDT"  # 交易对
+  side: "long"  # 交易方向
+  leverage: 20  # 杠杆倍数（较高）
+
+# 马丁格尔策略参数
+martingale:
+  initial_position: 300  # 初始仓位（USDT，较大）
+  multiplier: 3.0  # 加仓倍数（较大）
+  max_additions: 6  # 最大加仓次数（较多）
+
+# 触发条件
+trigger:
+  price_drop_percent: 7.0  # 价格下跌百分比阈值
+  start_immediately: true  # 是否立即开始
+
+# 风险管理
+risk:
+  stop_loss_percent: 15.0  # 止损百分比
+  take_profit_percent: 20.0  # 止盈百分比
+  max_loss_percent: 30.0  # 最大亏损百分比
+
+# 监控设置
+monitoring:
+  check_interval: 3  # 价格检查间隔（秒，更频繁）
+  price_precision: 2  # 价格精度
+"""
+)
+register_template(martingale_aggressive_template)
+
+
+# ETH 马丁格尔策略模板
+martingale_eth_template = StrategyTemplate(
+    id="martingale_eth",
+    name="ETH马丁格尔策略",
+    description="针对ETH/USDT交易对的马丁格尔策略",
+    category="加仓策略",
+    config_yaml="""# 交易配置
+trading:
+  symbol: "ETH/USDT:USDT"  # 交易对
+  side: "long"  # 交易方向
+  leverage: 10  # 杠杆倍数
+
+# 马丁格尔策略参数
+martingale:
+  initial_position: 200  # 初始仓位（USDT）
+  multiplier: 2.0  # 加仓倍数
+  max_additions: 5  # 最大加仓次数
+
+# 触发条件
+trigger:
+  price_drop_percent: 5.0  # 价格下跌百分比阈值
+  start_immediately: true  # 是否立即开始
+
+# 风险管理
+risk:
+  stop_loss_percent: 10.0  # 止损百分比
+  take_profit_percent: 15.0  # 止盈百分比
+  max_loss_percent: 20.0  # 最大亏损百分比
+
+# 监控设置
+monitoring:
+  check_interval: 5  # 价格检查间隔（秒）
+  price_precision: 2  # 价格精度
+"""
+)
+register_template(martingale_eth_template)

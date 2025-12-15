@@ -14,10 +14,12 @@ from .models.trade import Trade, TradeType, TradeSide
 from .models.position import Position, PositionSide
 from .models.account import AccountSnapshot
 from .exchange import BinanceExchange
+from .exchange_manager import get_exchange
 from .risk_manager import RiskManager
 from .config import Config
 from .strategies.base import BaseStrategy
 from .strategies.martingale import MartingaleStrategy
+from .strategies.random_forest import RandomForestStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ class StrategyManager:
     
     def _create_exchange(self, strategy_id: int, use_testnet: bool = False) -> BinanceExchange:
         """
-        创建交易所实例
+        创建交易所实例（使用单例管理器）
         
         Args:
             strategy_id: 策略ID
@@ -64,21 +66,9 @@ class StrategyManager:
         Returns:
             交易所实例
         """
-        if strategy_id in self.exchanges:
-            return self.exchanges[strategy_id]
-        
-            # 从环境变量获取API密钥
-        from dotenv import load_dotenv
-        load_dotenv()
-        
-        if use_testnet:
-            api_key = os.getenv('BINANCE_TESTNET_API_KEY') or os.getenv('BINANCE_API_KEY', '')
-            api_secret = os.getenv('BINANCE_TESTNET_SECRET_KEY') or os.getenv('BINANCE_SECRET_KEY', '')
-        else:
-            api_key = os.getenv('BINANCE_API_KEY', '')
-            api_secret = os.getenv('BINANCE_SECRET_KEY', '')
-        
-        exchange = BinanceExchange(api_key, api_secret, testnet=use_testnet)
+        # 使用单例管理器获取exchange实例，确保所有策略共享同一个实例
+        exchange = get_exchange(testnet=use_testnet)
+        # 仍然保存到字典中以便兼容现有代码
         self.exchanges[strategy_id] = exchange
         return exchange
     
@@ -128,8 +118,18 @@ class StrategyManager:
         # 根据策略类型创建实例
         if strategy.strategy_type == StrategyType.CONFIG:
             # 配置型策略
-            if 'martingale' in config_dict or 'trading' in config_dict:
+            if 'martingale' in config_dict:
                 # 马丁格尔策略
+                return MartingaleStrategy(strategy.id, exchange, risk_manager, config_dict)
+            elif 'ml' in config_dict or 'random_forest' in config_dict:
+                # 随机森林策略
+                return RandomForestStrategy(strategy.id, exchange, risk_manager, config_dict)
+            elif 'trading' in config_dict:
+                # 根据配置判断策略类型
+                # 如果有 ml 相关配置，使用随机森林策略
+                if 'ml' in config_dict.get('trading', {}):
+                    return RandomForestStrategy(strategy.id, exchange, risk_manager, config_dict)
+                # 否则使用马丁格尔策略
                 return MartingaleStrategy(strategy.id, exchange, risk_manager, config_dict)
             else:
                 logger.error(f"未知的配置型策略: {strategy.name}")
@@ -192,6 +192,90 @@ class StrategyManager:
             db.add(trade)
             db.commit()
             
+            # 更新或创建持仓记录
+            trade_type = trade_data['trade_type']
+            symbol = trade_data['symbol']
+            side = PositionSide(trade_data['side'])
+            price = trade_data['price']
+            amount = trade_data['amount']
+            
+            if trade_type in ['open', 'add']:
+                # 查找或创建持仓
+                position = db.query(Position).filter(
+                    Position.strategy_id == strategy_id,
+                    Position.symbol == symbol,
+                    Position.side == side,
+                    Position.is_closed == False
+                ).first()
+                
+                if position:
+                    # 更新现有持仓（加权平均价格）
+                    total_notional = position.notional_value + amount
+                    position.entry_price = (position.entry_price * position.notional_value + price * amount) / total_notional
+                    position.notional_value = total_notional
+                    position.contracts = position.contracts + (amount / price)  # 简化计算
+                    position.updated_at = datetime.utcnow()
+                else:
+                    # 创建新持仓
+                    # 获取交易所实例以获取当前价格和持仓信息
+                    exchange = None
+                    if strategy_id in self.strategies:
+                        strategy_instance = self.strategies[strategy_id]
+                        if hasattr(strategy_instance, 'exchange'):
+                            exchange = strategy_instance.exchange
+                    
+                    current_price = price  # 默认使用交易价格
+                    contracts = amount / price  # 简化计算（合约数量 = 名义价值 / 价格）
+                    leverage = 1  # 默认杠杆
+                    
+                    # 尝试从交易所获取实际持仓信息
+                    if exchange:
+                        try:
+                            exchange_position = exchange.get_open_position(symbol)
+                            if exchange_position:
+                                # 获取标记价格或最新价格
+                                current_price = exchange_position.get('markPrice') or exchange_position.get('lastPrice') or price
+                                # 获取实际合约数量
+                                exchange_contracts = abs(exchange_position.get('contracts', 0))
+                                if exchange_contracts > 0:
+                                    contracts = exchange_contracts
+                                # 获取杠杆
+                                leverage = exchange_position.get('leverage', 1)
+                        except Exception as e:
+                            logger.warning(f"获取持仓信息失败: {e}")
+                    
+                    position = Position(
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        side=side,
+                        entry_price=price,
+                        current_price=current_price,
+                        contracts=contracts,
+                        notional_value=amount,
+                        leverage=leverage,
+                        is_closed=False
+                    )
+                    db.add(position)
+                
+                db.commit()
+                
+            elif trade_type == 'close':
+                # 平仓：更新持仓为已平仓
+                position = db.query(Position).filter(
+                    Position.strategy_id == strategy_id,
+                    Position.symbol == symbol,
+                    Position.side == side,
+                    Position.is_closed == False
+                ).first()
+                
+                if position:
+                    position.is_closed = True
+                    position.closed_at = datetime.utcnow()
+                    if trade_data.get('pnl') is not None:
+                        # 如果有盈亏信息，可以更新（虽然平仓后不再需要）
+                        pass
+                    db.commit()
+            
             # 更新策略运行统计
             run = db.query(StrategyRun).filter(
                 StrategyRun.strategy_id == strategy_id,
@@ -199,11 +283,24 @@ class StrategyManager:
             ).order_by(StrategyRun.started_at.desc()).first()
             
             if run:
+                # 确保字段不为 None，如果是 None 则初始化为 0
+                if run.total_trades is None:
+                    run.total_trades = 0
+                if run.win_trades is None:
+                    run.win_trades = 0
+                if run.loss_trades is None:
+                    run.loss_trades = 0
+                
                 run.total_trades += 1
-                if trade_data.get('pnl', 0) > 0:
-                    run.win_trades += 1
-                elif trade_data.get('pnl', 0) < 0:
-                    run.loss_trades += 1
+                
+                # 处理 pnl，确保不是 None
+                pnl = trade_data.get('pnl')
+                if pnl is not None:
+                    if pnl > 0:
+                        run.win_trades += 1
+                    elif pnl < 0:
+                        run.loss_trades += 1
+                
                 db.commit()
             
             # 调用外部回调
@@ -280,10 +377,11 @@ class StrategyManager:
             
             # 创建运行记录
             balance = self.exchanges[strategy_id].get_balance()
+            start_balance = balance['total'] if balance else 0.0
             run = StrategyRun(
                 strategy_id=strategy_id,
                 status=StrategyStatus.RUNNING,
-                start_balance=balance['total'],
+                start_balance=start_balance,
                 started_at=datetime.utcnow()
             )
             db.add(run)
@@ -317,58 +415,75 @@ class StrategyManager:
         Returns:
             是否成功停止
         """
-        if strategy_id not in self.strategies:
-            logger.warning(f"策略未运行: {strategy_id}")
-            return False
-        
-        try:
-            # 停止策略实例
-            strategy_instance = self.strategies[strategy_id]
-            strategy_instance.is_active = False
-            strategy_instance.is_running = False
-            
-            # 取消任务
-            task = self.strategy_tasks.get(strategy_id)
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            
-            # 更新数据库
-            db = SessionLocal()
+        # 如果策略在运行中，先停止它
+        if strategy_id in self.strategies:
             try:
-                strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
-                if strategy:
+                # 停止策略实例
+                strategy_instance = self.strategies[strategy_id]
+                strategy_instance.is_active = False
+                strategy_instance.is_running = False
+                
+                # 取消任务
+                task = self.strategy_tasks.get(strategy_id)
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # 清理
+                del self.strategies[strategy_id]
+                if strategy_id in self.strategy_tasks:
+                    del self.strategy_tasks[strategy_id]
+                
+                logger.info(f"策略实例已停止: {strategy_id}")
+            except Exception as e:
+                logger.error(f"停止策略实例失败: {e}", exc_info=True)
+        
+        # 无论策略是否在运行中，都更新数据库状态
+        # 这样可以修复状态不同步的问题
+        db = SessionLocal()
+        try:
+            strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if strategy:
+                # 如果数据库状态是 RUNNING，更新为 STOPPED
+                if strategy.status == StrategyStatus.RUNNING:
                     strategy.status = StrategyStatus.STOPPED
-                
-                run = db.query(StrategyRun).filter(
-                    StrategyRun.strategy_id == strategy_id,
-                    StrategyRun.status == StrategyStatus.RUNNING
-                ).order_by(StrategyRun.started_at.desc()).first()
-                
-                if run:
-                    balance = self.exchanges[strategy_id].get_balance()
-                    run.status = StrategyStatus.STOPPED
-                    run.current_balance = balance['total']
-                    run.stopped_at = datetime.utcnow()
-                
-                db.commit()
-            finally:
-                db.close()
+                    logger.info(f"更新策略数据库状态为已停止: {strategy_id}")
+                else:
+                    logger.debug(f"策略数据库状态已经是 {strategy.status}，无需更新")
             
-            # 清理
-            del self.strategies[strategy_id]
-            if strategy_id in self.strategy_tasks:
-                del self.strategy_tasks[strategy_id]
+            # 更新运行记录
+            run = db.query(StrategyRun).filter(
+                StrategyRun.strategy_id == strategy_id,
+                StrategyRun.status == StrategyStatus.RUNNING
+            ).order_by(StrategyRun.started_at.desc()).first()
             
+            if run:
+                # 尝试获取余额（如果交易所实例存在）
+                balance = None
+                if strategy_id in self.exchanges:
+                    try:
+                        balance = self.exchanges[strategy_id].get_balance()
+                    except Exception as e:
+                        logger.warning(f"获取余额失败: {e}")
+                
+                run.status = StrategyStatus.STOPPED
+                run.current_balance = balance['total'] if balance else run.start_balance
+                run.stopped_at = datetime.utcnow()
+                logger.info(f"更新策略运行记录为已停止: {strategy_id}")
+            
+            db.commit()
             logger.info(f"策略已停止: {strategy_id}")
             return True
             
         except Exception as e:
-            logger.error(f"停止策略失败: {e}", exc_info=True)
+            logger.error(f"更新策略状态失败: {e}", exc_info=True)
+            db.rollback()
             return False
+        finally:
+            db.close()
     
     def get_strategy_status(self, strategy_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -415,6 +530,60 @@ class StrategyManager:
                 if status:
                     result.append(status)
             return result
+        finally:
+            db.close()
+    
+    def recover_strategy_states(self):
+        """
+        恢复策略状态（服务启动时调用）
+        将数据库中状态为 RUNNING 但实际未运行的策略状态重置为 STOPPED
+        """
+        db = SessionLocal()
+        try:
+            # 查找所有状态为 RUNNING 的策略
+            running_strategies = db.query(Strategy).filter(
+                Strategy.status == StrategyStatus.RUNNING
+            ).all()
+            
+            if not running_strategies:
+                logger.info("没有需要恢复的策略状态")
+                return
+            
+            logger.info(f"发现 {len(running_strategies)} 个状态为 RUNNING 的策略，开始恢复状态...")
+            
+            for strategy in running_strategies:
+                # 检查策略是否真的在运行（在内存中）
+                if strategy.id not in self.strategies:
+                    # 策略不在运行中，需要恢复状态
+                    logger.info(f"恢复策略 {strategy.id} ({strategy.name}) 的状态：RUNNING -> STOPPED")
+                    strategy.status = StrategyStatus.STOPPED
+                    
+                    # 更新运行记录
+                    run = db.query(StrategyRun).filter(
+                        StrategyRun.strategy_id == strategy.id,
+                        StrategyRun.status == StrategyStatus.RUNNING
+                    ).order_by(StrategyRun.started_at.desc()).first()
+                    
+                    if run:
+                        # 尝试获取余额（如果交易所实例存在）
+                        balance = None
+                        if strategy.id in self.exchanges:
+                            try:
+                                balance = self.exchanges[strategy.id].get_balance()
+                            except Exception as e:
+                                logger.warning(f"获取策略 {strategy.id} 余额失败: {e}")
+                        
+                        run.status = StrategyStatus.STOPPED
+                        run.current_balance = balance['total'] if balance else run.start_balance
+                        run.stopped_at = datetime.utcnow()
+                        logger.info(f"已更新策略 {strategy.id} 的运行记录状态")
+            
+            db.commit()
+            logger.info(f"策略状态恢复完成，共恢复 {len(running_strategies)} 个策略")
+            
+        except Exception as e:
+            logger.error(f"恢复策略状态失败: {e}", exc_info=True)
+            db.rollback()
         finally:
             db.close()
 

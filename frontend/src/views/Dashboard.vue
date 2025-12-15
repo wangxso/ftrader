@@ -1,6 +1,6 @@
 <template>
   <div class="dashboard">
-    <el-row :gutter="20">
+    <el-row :gutter="20" v-loading="loading">
       <el-col :span="6">
         <el-card>
           <template #header>
@@ -106,6 +106,7 @@ const statistics = ref<AccountStatistics>({
 
 const runningStrategies = ref<Strategy[]>([])
 const recentTrades = ref<Trade[]>([])
+const loading = ref(true)
 
 const formatCurrency = (value: number) => {
   return new Intl.NumberFormat('zh-CN', {
@@ -131,21 +132,27 @@ const viewStrategy = (id: number) => {
 
 const loadData = async () => {
   try {
-    // 加载统计信息
-    statistics.value = await accountApi.getStatistics()
+    loading.value = true
     
-    // 加载运行中的策略
-    const allStrategies = await strategiesApi.getAll()
+    // 并行加载所有数据，大幅提升性能
+    const [stats, allStrategies, trades] = await Promise.all([
+      accountApi.getStatistics(),
+      strategiesApi.getAll(),
+      accountApi.getHistory(undefined, 0, 10)
+    ])
+    
+    // 更新数据
+    statistics.value = stats
     runningStrategies.value = allStrategies.filter(s => s.status === 'running')
-    
-    // 加载最近交易
-    recentTrades.value = await accountApi.getHistory(undefined, 0, 10)
+    recentTrades.value = trades
   } catch (error: any) {
     console.error('加载数据失败:', error)
     // 如果API密钥未配置，显示默认值而不是错误
     if (error.response?.status === 500 && error.response?.data?.detail?.includes('API密钥')) {
       console.warn('API密钥未配置，显示默认值')
     }
+  } finally {
+    loading.value = false
   }
 }
 

@@ -10,6 +10,7 @@
         >
           <el-menu-item index="/dashboard">仪表板</el-menu-item>
           <el-menu-item index="/strategies">策略管理</el-menu-item>
+          <el-menu-item index="/backtest">策略回测</el-menu-item>
           <el-menu-item index="/account">账户</el-menu-item>
         </el-menu>
       </div>

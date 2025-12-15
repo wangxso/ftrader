@@ -4,6 +4,10 @@ export interface Strategy {
   description?: string
   strategy_type: 'config' | 'code'
   status: 'stopped' | 'running' | 'paused' | 'error'
+  config_yaml?: string
+  code_path?: string
+  code_content?: string
+  class_name?: string
   created_at: string
   updated_at: string
 }

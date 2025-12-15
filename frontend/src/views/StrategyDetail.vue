@@ -34,31 +34,59 @@
       </el-descriptions>
     </el-card>
 
-    <el-card style="margin-top: 20px">
+    <el-card style="margin-top: 20px" v-loading="chartLoading">
       <template #header>
         <span>价格图表</span>
       </template>
-      <div ref="priceChartRef" style="height: 400px"></div>
+      <div v-if="!trades || trades.length === 0" style="text-align: center; padding: 40px; color: #909399;">
+        暂无数据，请等待策略执行交易
+      </div>
+      <div ref="priceChartRef" style="height: 400px" v-else></div>
     </el-card>
 
     <el-card style="margin-top: 20px">
       <template #header>
         <span>交易记录</span>
       </template>
-      <el-table :data="trades" style="width: 100%">
-        <el-table-column prop="trade_type" label="类型" />
-        <el-table-column prop="side" label="方向" />
+      <div v-if="!trades || trades.length === 0" style="text-align: center; padding: 40px; color: #909399;">
+        暂无交易记录
+      </div>
+      <el-table v-else :data="trades" style="width: 100%">
+        <el-table-column prop="trade_type" label="类型">
+          <template #default="{ row }">
+            {{ row.trade_type === 'open' ? '开仓' : row.trade_type === 'close' ? '平仓' : '加仓' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="side" label="方向">
+          <template #default="{ row }">
+            <el-tag :type="row.side === 'long' ? 'success' : 'danger'">
+              {{ row.side === 'long' ? '做多' : '做空' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="symbol" label="交易对" />
-        <el-table-column prop="price" label="价格" />
-        <el-table-column prop="amount" label="数量" />
+        <el-table-column prop="price" label="价格">
+          <template #default="{ row }">
+            {{ row.price ? row.price.toFixed(2) : '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="amount" label="数量">
+          <template #default="{ row }">
+            {{ row.amount ? row.amount.toFixed(2) : '-' }}
+          </template>
+        </el-table-column>
         <el-table-column prop="pnl" label="盈亏">
           <template #default="{ row }">
             <span :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">
-              {{ row.pnl ? formatCurrency(row.pnl) : '-' }}
+              {{ row.pnl !== null && row.pnl !== undefined ? formatCurrency(row.pnl) : '-' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="executed_at" label="执行时间" />
+        <el-table-column prop="executed_at" label="执行时间">
+          <template #default="{ row }">
+            {{ formatDate(row.executed_at) }}
+          </template>
+        </el-table-column>
       </el-table>
     </el-card>
 
@@ -127,12 +155,51 @@ const formatDate = (dateStr: string) => {
   return new Date(dateStr).toLocaleString('zh-CN')
 }
 
-const initPriceChart = () => {
-  if (!priceChartRef.value) return
+const initPriceChart = async () => {
+  if (!priceChartRef.value) {
+    console.warn('价格图表容器不存在')
+    return
+  }
 
   priceChart = echarts.init(priceChartRef.value)
   
-  // 初始化图表（实际数据需要从API获取K线数据）
+  // 尝试从API获取价格历史数据
+  let priceData: any[] = []
+  let timeData: string[] = []
+  
+  try {
+    const history = await strategiesApi.getPriceHistory(strategyId, '1m', 100)
+    console.log('获取价格历史数据:', history)
+    if (history && history.length > 0) {
+      priceData = history.map((h: any) => h.close)
+      timeData = history.map((h: any) => {
+        const date = new Date(h.timestamp)
+        return date.toLocaleTimeString('zh-CN')
+      })
+      console.log('使用价格历史数据，数据点数量:', priceData.length)
+    }
+  } catch (error) {
+    console.warn('获取价格历史失败，将使用交易记录数据:', error)
+  }
+  
+  // 如果没有价格历史数据，使用交易记录的价格数据
+  if (priceData.length === 0 && trades.value && trades.value.length > 0) {
+    console.log('使用交易记录数据，交易数量:', trades.value.length)
+    // 按时间排序交易记录
+    const sortedTrades = [...trades.value].sort((a, b) => 
+      new Date(a.executed_at).getTime() - new Date(b.executed_at).getTime()
+    )
+    priceData = sortedTrades.map(t => t.price)
+    timeData = sortedTrades.map(t => {
+      const date = new Date(t.executed_at)
+      return date.toLocaleTimeString('zh-CN')
+    })
+  }
+  
+  if (priceData.length === 0) {
+    console.warn('没有可用的价格数据，图表将显示为空')
+  }
+  
   const option = {
     title: {
       text: '价格走势',
@@ -140,20 +207,42 @@ const initPriceChart = () => {
     },
     tooltip: {
       trigger: 'axis',
+      formatter: (params: any) => {
+        const param = params[0]
+        return `${param.name}<br/>${param.seriesName}: ${param.value.toFixed(2)}`
+      },
     },
     xAxis: {
       type: 'category',
-      data: [],
+      data: timeData,
+      boundaryGap: false,
     },
     yAxis: {
       type: 'value',
+      scale: true,
     },
     series: [
       {
         name: '价格',
         type: 'line',
-        data: [],
+        data: priceData,
         smooth: true,
+        itemStyle: {
+          color: '#409eff',
+        },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(64, 158, 255, 0.3)' },
+              { offset: 1, color: 'rgba(64, 158, 255, 0.1)' },
+            ],
+          },
+        },
       },
     ],
   }
@@ -161,14 +250,179 @@ const initPriceChart = () => {
   priceChart.setOption(option)
 }
 
+const loading = ref(true)
+const chartLoading = ref(false)
+
 const loadData = async () => {
   try {
-    strategy.value = await strategiesApi.getById(strategyId)
-    trades.value = await accountApi.getHistory(strategyId, 0, 100)
-    status.value = await strategiesApi.getStatus(strategyId)
+    loading.value = true
+    console.log('开始加载数据，策略ID:', strategyId)
+    
+    // 并行加载主要数据
+    const [strategyData, tradesData, statusData] = await Promise.all([
+      strategiesApi.getById(strategyId),
+      accountApi.getHistory(strategyId, 0, 100),
+      strategiesApi.getStatus(strategyId)
+    ])
+    
+    strategy.value = strategyData
+    trades.value = tradesData
+    status.value = statusData
+    
+    console.log('策略数据:', strategy.value)
+    console.log('交易记录:', trades.value)
+    console.log('策略状态:', status.value)
+    
+    // 更新交易记录的实时盈亏（在更新图表之前）
+    await updateTradePnL()
+    
+    // 异步更新价格图表，不阻塞主要数据加载
+    updatePriceChartAsync()
   } catch (error) {
     ElMessage.error('加载数据失败')
-    console.error(error)
+    console.error('加载数据失败:', error)
+  } finally {
+    loading.value = false
+  }
+}
+
+const updatePriceChartAsync = async () => {
+  // 图表加载独立进行，显示在图表card内的loading
+  chartLoading.value = true
+  try {
+    await nextTick()
+    if (priceChart) {
+      await updatePriceChart()
+    } else if (priceChartRef.value) {
+      // 如果图表未初始化，现在初始化
+      await initPriceChart()
+    }
+  } catch (error) {
+    console.error('更新图表失败:', error)
+  } finally {
+    chartLoading.value = false
+  }
+}
+
+const updatePriceChart = async () => {
+  if (!priceChart) return
+  
+  try {
+    // 尝试获取价格历史数据
+    const history = await strategiesApi.getPriceHistory(strategyId, '1m', 100)
+    if (history && history.length > 0) {
+      const priceData = history.map((h: any) => h.close)
+      const timeData = history.map((h: any) => {
+        const date = new Date(h.timestamp)
+        return date.toLocaleTimeString('zh-CN')
+      })
+      
+      priceChart.setOption({
+        xAxis: {
+          data: timeData,
+        },
+        series: [
+          {
+            data: priceData,
+          },
+        ],
+      })
+      return
+    }
+  } catch (error) {
+    console.warn('获取价格历史失败:', error)
+  }
+  
+  // 如果没有价格历史，使用交易记录
+  if (trades.value.length > 0) {
+    const sortedTrades = [...trades.value].sort((a, b) => 
+      new Date(a.executed_at).getTime() - new Date(b.executed_at).getTime()
+    )
+    const priceData = sortedTrades.map(t => t.price)
+    const timeData = sortedTrades.map(t => {
+      const date = new Date(t.executed_at)
+      return date.toLocaleTimeString('zh-CN')
+    })
+    
+    priceChart.setOption({
+      xAxis: {
+        data: timeData,
+      },
+      series: [
+        {
+          data: priceData,
+        },
+      ],
+    })
+  }
+}
+
+const updateTradePnL = async () => {
+  // 获取当前持仓，计算未平仓交易的实时盈亏
+  try {
+    const positions = await accountApi.getStrategyPositions(strategyId)
+    console.log('获取持仓数据:', positions)
+    
+    if (!strategy.value) {
+      console.warn('策略数据不存在')
+      return
+    }
+    
+    if (!positions || positions.length === 0) {
+      console.log('没有持仓数据，跳过盈亏计算')
+      return
+    }
+    
+    // 为未平仓的交易计算实时盈亏
+    // 创建一个映射，将交易记录与持仓关联
+    const positionMap = new Map<string, any>()
+    positions.forEach((p: any) => {
+      const key = `${p.symbol}_${p.side}`
+      positionMap.set(key, p)
+    })
+    
+    // 计算每个交易的实时盈亏
+    if (!trades.value || trades.value.length === 0) {
+      console.log('没有交易记录')
+      return
+    }
+    
+    let updatedCount = 0
+    for (const trade of trades.value) {
+      // 如果交易已经有盈亏（已平仓），跳过
+      if (trade.pnl !== null && trade.pnl !== undefined) {
+        continue
+      }
+      
+      // 查找对应的持仓
+      const key = `${trade.symbol}_${trade.side}`
+      const position = positionMap.get(key)
+      
+      if (position && position.current_price && !position.is_closed) {
+        // 计算实时盈亏
+        // 对于开仓和加仓交易，使用持仓的加权平均价格和当前价格计算
+        if (trade.trade_type === 'open' || trade.trade_type === 'add') {
+          // 优先使用持仓的未实现盈亏百分比
+          if (position.unrealized_pnl_percent !== null && position.unrealized_pnl_percent !== undefined) {
+            // 根据交易金额占持仓的比例计算盈亏
+            const tradeValue = trade.price * (trade.amount || 0)
+            const pnlPercent = position.unrealized_pnl_percent / 100
+            trade.pnl = tradeValue * pnlPercent
+            updatedCount++
+          } else if (position.entry_price && position.current_price) {
+            // 使用持仓的加权平均价格计算
+            const priceDiff = trade.side === 'long' 
+              ? (position.current_price - position.entry_price)
+              : (position.entry_price - position.current_price)
+            trade.pnl = priceDiff * (trade.amount / position.entry_price)
+            updatedCount++
+          }
+        }
+      }
+    }
+    console.log(`更新了 ${updatedCount} 个交易的盈亏`)
+  } catch (error) {
+    console.error('更新交易盈亏失败:', error)
   }
 }
 
@@ -195,7 +449,7 @@ const stopStrategy = async () => {
 onMounted(async () => {
   await loadData()
   await nextTick()
-  initPriceChart()
+  await initPriceChart()
   
   // 监听WebSocket消息
   wsClient.on('strategy_status', (data: any) => {

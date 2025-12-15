@@ -44,9 +44,21 @@ class ConnectionManager:
         disconnected = []
         for connection in self.active_connections:
             try:
+                # 检查连接状态
+                if connection.client_state.name == 'DISCONNECTED':
+                    disconnected.append(connection)
+                    continue
                 await connection.send_text(message)
+            except RuntimeError as e:
+                # 连接已关闭或响应已完成
+                error_msg = str(e)
+                if 'websocket.close' in error_msg or 'response already completed' in error_msg:
+                    logger.debug(f"连接已关闭，跳过消息发送: {e}")
+                else:
+                    logger.warning(f"广播消息失败: {e}")
+                disconnected.append(connection)
             except Exception as e:
-                logger.error(f"广播消息失败: {e}")
+                logger.warning(f"广播消息失败: {e}")
                 disconnected.append(connection)
         
         # 清理断开的连接

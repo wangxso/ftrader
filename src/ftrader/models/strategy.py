@@ -50,6 +50,7 @@ class Strategy(Base):
     # 关联关系
     runs = relationship("StrategyRun", back_populates="strategy", cascade="all, delete-orphan")
     trades = relationship("Trade", back_populates="strategy", cascade="all, delete-orphan")
+    backtest_results = relationship("BacktestResult", back_populates="strategy", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Strategy(id={self.id}, name='{self.name}', status='{self.status}')>"
@@ -68,9 +69,9 @@ class StrategyRun(Base):
     # 运行统计
     start_balance = Column(Float, nullable=True)  # 启动时余额
     current_balance = Column(Float, nullable=True)  # 当前余额
-    total_trades = Column(Integer, default=0)  # 总交易次数
-    win_trades = Column(Integer, default=0)  # 盈利交易次数
-    loss_trades = Column(Integer, default=0)  # 亏损交易次数
+    total_trades = Column(Integer, default=0, nullable=False)  # 总交易次数
+    win_trades = Column(Integer, default=0, nullable=False)  # 盈利交易次数
+    loss_trades = Column(Integer, default=0, nullable=False)  # 亏损交易次数
     
     # 时间戳
     started_at = Column(DateTime, nullable=True)
