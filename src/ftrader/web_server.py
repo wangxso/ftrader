@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -95,6 +96,13 @@ async def startup_event():
     if not logging.getLogger().handlers:
         log_level = os.getenv("LOG_LEVEL", "INFO")
         setup_logging(log_level)
+    
+    # 设置WebSocket管理器的主事件循环
+    from .api.websocket import manager
+    try:
+        manager.set_main_loop(asyncio.get_running_loop())
+    except RuntimeError:
+        pass
     
     logger.info("初始化数据库...")
     init_db()

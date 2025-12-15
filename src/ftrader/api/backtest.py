@@ -16,6 +16,7 @@ from ..exchange_manager import get_exchange
 from ..strategies.martingale import MartingaleStrategy
 from ..strategies.random_forest import RandomForestStrategy
 from ..strategies.llm_strategy import LLMStrategy
+from ..api.websocket import broadcast_backtest_progress
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +191,18 @@ def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime,
         if strategy_class is None:
             raise ValueError("无法识别策略类型，请检查配置文件中是否包含 llm、ml 或 martingale 字段")
         
+        # 创建进度回调函数
+        def progress_callback(current: int, total: int, percentage: float, current_balance: float):
+            """回测进度回调"""
+            broadcast_backtest_progress(backtest_id, current, total, percentage, current_balance)
+        
         # 创建回测引擎
         backtester = Backtester(
             strategy_class=strategy_class,
             strategy_config=strategy_config,
             ohlcv_data=ohlcv_data,
-            initial_balance=initial_balance
+            initial_balance=initial_balance,
+            progress_callback=progress_callback
         )
         
         # 运行回测

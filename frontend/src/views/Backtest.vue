@@ -59,6 +59,59 @@
           </el-button>
         </el-form-item>
       </el-form>
+
+      <!-- 回测进度显示 -->
+      <el-card v-if="currentBacktestProgress" style="margin-top: 20px">
+        <template #header>
+          <div class="header">
+            <span>回测进度</span>
+            <el-tag type="warning">运行中</el-tag>
+          </div>
+        </template>
+        <div>
+          <el-progress
+            :percentage="currentBacktestProgress.percentage"
+            :status="currentBacktestProgress.percentage >= 100 ? 'success' : 'active'"
+            :stroke-width="20"
+          />
+          <div style="margin-top: 15px; display: flex; justify-content: space-between; flex-wrap: wrap">
+            <div>
+              <span style="color: #909399">进度: </span>
+              <span style="font-weight: bold">
+                {{ currentBacktestProgress.current }} / {{ currentBacktestProgress.total }}
+                ({{ currentBacktestProgress.percentage.toFixed(2) }}%)
+              </span>
+            </div>
+            <div>
+              <span style="color: #909399">当前余额: </span>
+              <span
+                style="font-weight: bold"
+                :style="{
+                  color:
+                    currentBacktestProgress.current_balance >= backtestForm.initial_balance
+                      ? '#3f8600'
+                      : '#cf1322',
+                }"
+              >
+                {{ currentBacktestProgress.current_balance.toFixed(2) }} USDT
+              </span>
+            </div>
+            <div>
+              <span style="color: #909399">收益率: </span>
+              <span
+                style="font-weight: bold"
+                :style="{
+                  color:
+                    currentBacktestProgress.return >= 0 ? '#3f8600' : '#cf1322',
+                }"
+              >
+                {{ currentBacktestProgress.return >= 0 ? '+' : '' }}
+                {{ currentBacktestProgress.return.toFixed(2) }}%
+              </span>
+            </div>
+          </div>
+        </div>
+      </el-card>
     </el-card>
 
     <!-- 回测结果列表 -->
@@ -213,12 +266,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { strategiesApi } from '../api/strategies'
 import { backtestApi, type BacktestRequest, type BacktestResult, type BacktestDetail } from '../api/backtest'
 import * as echarts from 'echarts'
 import type { Strategy } from '../types'
+import { wsClient } from '../api/websocket'
 
 const strategies = ref<Strategy[]>([])
 const backtestForm = ref<BacktestRequest>({
@@ -237,10 +291,59 @@ const detail = ref<BacktestDetail | null>(null)
 const equityChartRef = ref<HTMLElement | null>(null)
 let equityChart: echarts.ECharts | null = null
 
+// 回测进度
+const currentBacktestProgress = ref<{
+  backtest_id: number
+  current: number
+  total: number
+  percentage: number
+  current_balance: number
+  return: number
+} | null>(null)
+const currentBacktestId = ref<number | null>(null)
+
 onMounted(async () => {
   await loadStrategies()
   await loadResults()
+  
+  // 确保WebSocket已连接
+  if (!wsClient.ws || wsClient.ws.readyState !== WebSocket.OPEN) {
+    wsClient.connect()
+  }
+  
+  // 监听WebSocket消息
+  wsClient.on('backtest_progress', handleBacktestProgress)
 })
+
+onUnmounted(() => {
+  // 清理WebSocket监听
+  wsClient.off('backtest_progress', handleBacktestProgress)
+})
+
+const handleBacktestProgress = (data: any) => {
+  if (data.type === 'backtest_progress') {
+    // 只显示当前正在运行的回测进度
+    if (currentBacktestId.value === null || data.backtest_id === currentBacktestId.value) {
+      currentBacktestProgress.value = {
+        backtest_id: data.backtest_id,
+        current: data.current,
+        total: data.total,
+        percentage: data.percentage,
+        current_balance: data.current_balance,
+        return: ((data.current_balance - backtestForm.value.initial_balance) / backtestForm.value.initial_balance) * 100,
+      }
+      
+      // 如果进度达到100%，延迟清除进度显示
+      if (data.percentage >= 100) {
+        setTimeout(() => {
+          currentBacktestProgress.value = null
+          currentBacktestId.value = null
+          loadResults() // 刷新结果列表
+        }, 2000)
+      }
+    }
+  }
+}
 
 const loadStrategies = async () => {
   try {
@@ -270,17 +373,23 @@ const runBacktest = async () => {
   }
 
   running.value = true
+  currentBacktestProgress.value = null
+  currentBacktestId.value = null
+  
   try {
     const request: BacktestRequest = {
       ...backtestForm.value,
       start_date: dateRange.value[0],
       end_date: dateRange.value[1],
     }
-    await backtestApi.run(request)
-    ElMessage.success('回测任务已启动，请稍后查看结果')
+    const result = await backtestApi.run(request)
+    currentBacktestId.value = result.id
+    ElMessage.success('回测任务已启动，正在实时显示进度...')
     await loadResults()
   } catch (error: any) {
     ElMessage.error('启动回测失败: ' + (error.message || '未知错误'))
+    currentBacktestProgress.value = null
+    currentBacktestId.value = null
   } finally {
     running.value = false
   }

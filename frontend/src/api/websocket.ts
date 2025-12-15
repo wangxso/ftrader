@@ -1,7 +1,7 @@
 type MessageHandler = (data: any) => void
 
 class WebSocketClient {
-  private ws: WebSocket | null = null
+  public ws: WebSocket | null = null
   private handlers: Map<string, MessageHandler[]> = new Map()
   private reconnectAttempts = 0
   private maxReconnectAttempts = 5

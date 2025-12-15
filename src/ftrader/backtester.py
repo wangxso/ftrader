@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from decimal import Decimal
 
 from .exchange import BinanceExchange
@@ -335,7 +335,8 @@ class Backtester:
     """回测引擎"""
     
     def __init__(self, strategy_class, strategy_config: Dict[str, Any], 
-                 ohlcv_data: List[List], initial_balance: float = 10000.0):
+                 ohlcv_data: List[List], initial_balance: float = 10000.0,
+                 progress_callback: Optional[Callable[[int, int, float, float], None]] = None):
         """
         初始化回测引擎
         
@@ -344,11 +345,13 @@ class Backtester:
             strategy_config: 策略配置
             ohlcv_data: K线数据
             initial_balance: 初始余额
+            progress_callback: 进度回调函数，接收 (current, total, percentage, current_balance) 参数
         """
         self.strategy_class = strategy_class
         self.strategy_config = strategy_config
         self.ohlcv_data = ohlcv_data
         self.initial_balance = initial_balance
+        self.progress_callback = progress_callback
         
         # 创建模拟交易所
         self.mock_exchange = MockExchange(ohlcv_data, initial_balance)
@@ -423,9 +426,13 @@ class Backtester:
             # 执行回测循环
             # 在回测中，每个K线都执行一次策略检查（因为K线数据已经包含了时间信息）
             # 这样可以确保策略能够及时响应价格变化
-            step = 1  # 每个K线都检查一次
+            total_steps = len(self.ohlcv_data) - 1
+            progress_update_interval = max(1, total_steps // 100)  # 每1%更新一次进度
+            last_progress_update = 0
             
-            while self.mock_exchange.current_index < len(self.ohlcv_data) - 1:
+            while self.mock_exchange.current_index < total_steps:
+                current_index = self.mock_exchange.current_index
+                
                 # 执行策略检查
                 try:
                     should_continue = loop.run_until_complete(self.strategy.run_once())
@@ -439,12 +446,30 @@ class Backtester:
                     logger.warning(f"策略执行错误: {e}")
                     # 即使出错也继续运行，避免回测中断
                 
+                # 更新进度（定期更新，避免过于频繁）
+                if self.progress_callback and (current_index - last_progress_update >= progress_update_interval or current_index == total_steps - 1):
+                    percentage = (current_index + 1) / total_steps * 100
+                    current_balance = self.mock_exchange.get_balance()['total']
+                    try:
+                        self.progress_callback(current_index + 1, total_steps, percentage, current_balance)
+                    except Exception as e:
+                        logger.warning(f"进度回调失败: {e}")
+                    last_progress_update = current_index
+                
                 # 推进到下一个K线
                 if not self.mock_exchange.advance():
                     break
             
             # 停止策略
             loop.run_until_complete(self.strategy.stop())
+            
+            # 发送最终进度更新（100%）
+            if self.progress_callback:
+                final_balance = self.mock_exchange.get_balance()['total']
+                try:
+                    self.progress_callback(total_steps, total_steps, 100.0, final_balance)
+                except Exception as e:
+                    logger.warning(f"最终进度回调失败: {e}")
             
         finally:
             loop.close()

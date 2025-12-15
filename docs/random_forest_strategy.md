@@ -45,12 +45,6 @@ trading_params:
   position_size: 200.0
   # 最大持仓数
   max_position: 1
-  # 最短持仓时间（秒），避免频繁交易，默认60秒
-  min_hold_time: 60
-  # 平仓置信度阈值，如果为null则使用confidence_threshold的1.1倍
-  close_confidence_threshold: null
-  # 平仓后冷却时间（秒），避免立即反向开仓，默认30秒
-  close_cooldown: 30
 
 risk:
   stop_loss_percent: 10.0
@@ -84,9 +78,6 @@ monitoring:
 
 - **position_size**: 每次开仓使用的金额（USDT）
 - **max_position**: 最大同时持仓数（当前版本固定为1）
-- **min_hold_time**: 最短持仓时间（秒），避免刚开仓就平仓导致的频繁交易，默认60秒
-- **close_confidence_threshold**: 平仓置信度阈值，如果为null则自动使用开仓阈值的1.1倍（更保守）。建议设置比开仓阈值更高，避免因小幅波动就平仓
-- **close_cooldown**: 平仓后冷却时间（秒），避免立即反向开仓，默认30秒。有助于减少频繁反转交易
 
 ## 技术指标
 
@@ -112,9 +103,8 @@ monitoring:
    - 否则使用默认参数训练
 5. **预测**：使用训练好的模型预测价格方向
 6. **交易决策**：
-   - 如果预测置信度高于阈值，且满足持仓时间要求，执行交易
-   - 如果预测方向与持仓相反，且置信度高于平仓阈值，且持仓时间超过最短持仓时间，考虑平仓
-   - 平仓后进入冷却期，避免立即反向开仓
+   - 如果预测置信度高于阈值，执行交易
+   - 如果预测方向与持仓相反，考虑平仓
 7. **定期重训练**：按照配置的间隔重新训练模型
 
 ## 注意事项
@@ -186,11 +176,4 @@ monitoring:
 - 降低 `confidence_threshold`
 - 检查是否有足够的历史数据
 - 确认模型训练是否成功
-
-### 交易频率过高（频繁开平仓）
-
-- 增加 `min_hold_time`（最短持仓时间）
-- 提高 `close_confidence_threshold`（平仓置信度阈值）
-- 增加 `close_cooldown`（平仓冷却时间）
-- 检查模型预测是否过于敏感
 

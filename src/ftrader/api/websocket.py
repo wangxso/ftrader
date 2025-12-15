@@ -2,8 +2,9 @@
 
 import json
 import asyncio
+import threading
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 from ..strategy_manager import get_strategy_manager
@@ -18,6 +19,11 @@ class ConnectionManager:
     
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.main_loop: Optional[asyncio.AbstractEventLoop] = None
+    
+    def set_main_loop(self, loop: asyncio.AbstractEventLoop):
+        """设置主事件循环（用于在同步上下文中调用异步函数）"""
+        self.main_loop = loop
     
     async def connect(self, websocket: WebSocket):
         """接受WebSocket连接"""
@@ -99,10 +105,51 @@ def broadcast_error(strategy_id: int, error_message: str):
     asyncio.create_task(manager.broadcast(json.dumps(message)))
 
 
+def broadcast_backtest_progress(backtest_id: int, current: int, total: int, 
+                                percentage: float, current_balance: float):
+    """广播回测进度（可在同步上下文中调用）"""
+    message = {
+        'type': 'backtest_progress',
+        'backtest_id': backtest_id,
+        'current': current,
+        'total': total,
+        'percentage': round(percentage, 2),
+        'current_balance': round(current_balance, 2),
+    }
+    message_str = json.dumps(message)
+    
+    # 尝试获取事件循环
+    try:
+        # 如果在异步上下文中，直接创建任务
+        loop = asyncio.get_running_loop()
+        asyncio.create_task(manager.broadcast(message_str))
+    except RuntimeError:
+        # 如果不在异步上下文中（如在后台线程中），使用主事件循环
+        if manager.main_loop and manager.main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(manager.broadcast(message_str), manager.main_loop)
+        else:
+            # 如果主循环不可用，尝试获取当前线程的事件循环
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(manager.broadcast(message_str), loop)
+                else:
+                    loop.run_until_complete(manager.broadcast(message_str))
+            except RuntimeError:
+                logger.warning("无法获取事件循环，跳过回测进度广播")
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket端点"""
     await manager.connect(websocket)
+    
+    # 设置主事件循环（用于在同步上下文中调用异步函数）
+    if manager.main_loop is None:
+        try:
+            manager.set_main_loop(asyncio.get_running_loop())
+        except RuntimeError:
+            pass
     
     # 注册策略管理器的回调
     strategy_manager = get_strategy_manager()
