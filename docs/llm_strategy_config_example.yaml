@@ -1,0 +1,49 @@
+# LLM多因子策略配置示例
+
+trading:
+  symbol: "BTC/USDT:USDT"  # 交易对
+  leverage: 10               # 杠杆倍数
+
+llm:
+  # API配置
+  api_provider: "openai"     # API提供商: openai, custom
+  # api_key: "sk-..."        # API密钥（建议通过环境变量 OPENAI_API_KEY 设置）
+  # api_base: ""             # 自定义API端点（可选，用于兼容OpenAI API的第三方服务）
+  model: "gpt-4o-mini"       # 模型名称（推荐：gpt-4o-mini, gpt-4, gpt-3.5-turbo）
+  temperature: 0.3           # 温度参数（0-1，越低越确定，推荐0.2-0.4）
+  max_tokens: 500            # 最大输出token数
+  call_interval: 300          # LLM调用间隔（秒），避免频繁调用，推荐300-600
+  
+  # 提示词配置
+  prompt:
+    enable_cot: true         # 启用思维链推理（会增加token消耗）
+    # 可选：自定义系统提示词
+    # system_prompt: |
+    #   你是一位专业的加密货币交易分析师...
+    # 可选：自定义用户提示词模板
+    # user_prompt_template: |
+    #   请分析以下市场数据...
+
+# 多因子配置
+factors:
+  lookback_periods: 100      # 历史数据回看周期
+  periods: [5, 10, 20, 50]   # 多周期因子计算周期
+  enable_volume: true        # 是否启用成交量分析
+  enable_orderbook: false    # 是否启用订单簿分析（暂未实现）
+
+# 交易参数
+trading_params:
+  position_size: 200.0       # 每次开仓金额（USDT）
+  max_position: 1            # 最大持仓数
+  confidence_threshold: 0.7  # 置信度阈值（0-1），低于此值不执行交易，推荐0.7-0.8
+
+# 监控配置
+monitoring:
+  check_interval: 60         # 策略检查间隔（秒）
+
+# 风险管理
+risk:
+  stop_loss_percent: 10.0    # 止损百分比
+  take_profit_percent: 15.0  # 止盈百分比
+  max_loss_percent: 20.0     # 最大亏损百分比
+

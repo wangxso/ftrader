@@ -14,6 +14,8 @@ from ..models.backtest import BacktestResult, BacktestStatus
 from ..backtester import Backtester
 from ..exchange_manager import get_exchange
 from ..strategies.martingale import MartingaleStrategy
+from ..strategies.random_forest import RandomForestStrategy
+from ..strategies.llm_strategy import LLMStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +158,41 @@ def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime,
         
         logger.info(f"获取到 {len(ohlcv_data)} 条K线数据")
         
+        # 根据配置自动识别策略类型
+        strategy_class = None
+        
+        # 优先检查顶层的策略标识字段
+        if 'llm' in strategy_config:
+            logger.info("检测到顶层llm配置，使用LLM多因子策略")
+            strategy_class = LLMStrategy
+        elif 'ml' in strategy_config or 'random_forest' in strategy_config:
+            logger.info("检测到顶层ml/random_forest配置，使用随机森林策略")
+            strategy_class = RandomForestStrategy
+        elif 'martingale' in strategy_config:
+            logger.info("检测到顶层martingale配置，使用马丁格尔策略")
+            strategy_class = MartingaleStrategy
+        elif 'trading' in strategy_config:
+            # 检查trading字段下的配置
+            trading_config = strategy_config.get('trading', {})
+            if 'llm' in trading_config:
+                logger.info("检测到trading.llm配置，使用LLM多因子策略")
+                strategy_class = LLMStrategy
+            elif 'ml' in trading_config:
+                logger.info("检测到trading.ml配置，使用随机森林策略")
+                strategy_class = RandomForestStrategy
+            else:
+                logger.info("检测到trading配置但无策略标识，默认使用马丁格尔策略")
+                strategy_class = MartingaleStrategy
+        else:
+            logger.warning("未找到策略标识字段，默认使用马丁格尔策略")
+            strategy_class = MartingaleStrategy
+        
+        if strategy_class is None:
+            raise ValueError("无法识别策略类型，请检查配置文件中是否包含 llm、ml 或 martingale 字段")
+        
         # 创建回测引擎
         backtester = Backtester(
-            strategy_class=MartingaleStrategy,
+            strategy_class=strategy_class,
             strategy_config=strategy_config,
             ohlcv_data=ohlcv_data,
             initial_balance=initial_balance

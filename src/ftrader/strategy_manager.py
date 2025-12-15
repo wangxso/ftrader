@@ -20,6 +20,7 @@ from .config import Config
 from .strategies.base import BaseStrategy
 from .strategies.martingale import MartingaleStrategy
 from .strategies.random_forest import RandomForestStrategy
+from .strategies.llm_strategy import LLMStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -118,22 +119,42 @@ class StrategyManager:
         # 根据策略类型创建实例
         if strategy.strategy_type == StrategyType.CONFIG:
             # 配置型策略
-            if 'martingale' in config_dict:
-                # 马丁格尔策略
-                return MartingaleStrategy(strategy.id, exchange, risk_manager, config_dict)
-            elif 'ml' in config_dict or 'random_forest' in config_dict:
-                # 随机森林策略
+            # 优先检查顶层的策略标识字段（即使有trading字段也优先检查顶层）
+            
+            # 1. 检查顶层是否有LLM配置
+            if 'llm' in config_dict:
+                logger.info(f"检测到顶层llm配置，使用LLM多因子策略")
+                return LLMStrategy(strategy.id, exchange, risk_manager, config_dict)
+            
+            # 2. 检查顶层是否有ML/随机森林配置
+            if 'ml' in config_dict or 'random_forest' in config_dict:
+                logger.info(f"检测到顶层ml/random_forest配置，使用随机森林策略")
                 return RandomForestStrategy(strategy.id, exchange, risk_manager, config_dict)
-            elif 'trading' in config_dict:
-                # 根据配置判断策略类型
-                # 如果有 ml 相关配置，使用随机森林策略
-                if 'ml' in config_dict.get('trading', {}):
-                    return RandomForestStrategy(strategy.id, exchange, risk_manager, config_dict)
-                # 否则使用马丁格尔策略
+            
+            # 3. 检查顶层是否有马丁格尔配置
+            if 'martingale' in config_dict:
+                logger.info(f"检测到顶层martingale配置，使用马丁格尔策略")
                 return MartingaleStrategy(strategy.id, exchange, risk_manager, config_dict)
-            else:
-                logger.error(f"未知的配置型策略: {strategy.name}")
-                return None
+            
+            # 4. 如果顶层没有策略标识，检查trading字段下的配置
+            if 'trading' in config_dict:
+                trading_config = config_dict.get('trading', {})
+                # 检查trading下是否有llm配置
+                if 'llm' in trading_config:
+                    logger.info(f"检测到trading.llm配置，使用LLM多因子策略")
+                    return LLMStrategy(strategy.id, exchange, risk_manager, config_dict)
+                # 检查trading下是否有ml配置
+                elif 'ml' in trading_config:
+                    logger.info(f"检测到trading.ml配置，使用随机森林策略")
+                    return RandomForestStrategy(strategy.id, exchange, risk_manager, config_dict)
+                # 如果trading下没有策略标识，但有trading字段，默认使用马丁格尔策略
+                else:
+                    logger.info(f"检测到trading配置但无策略标识，默认使用马丁格尔策略")
+                    return MartingaleStrategy(strategy.id, exchange, risk_manager, config_dict)
+            
+            # 5. 如果都没有找到策略标识，报错
+            logger.error(f"未知的配置型策略: {strategy.name}，未找到策略标识字段（llm/ml/martingale）")
+            return None
         elif strategy.strategy_type == StrategyType.CODE:
             # 代码型策略（待实现）
             logger.warning("代码型策略暂未实现")

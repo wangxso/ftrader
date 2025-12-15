@@ -494,6 +494,11 @@ class MartingaleStrategy(BaseStrategy):
                                 self.highest_price = min(self.highest_price, current_price)
                     else:
                         logger.error("开仓失败")
+                        # 如果开仓失败（如余额不足），为了避免无限循环，标记为已尝试
+                        # 这样即使 start_immediately=True，也不会在每次 run_once 时都尝试开仓
+                        # 如果后续余额充足，可以通过手动重启策略或等待触发条件来重新开仓
+                        self.initial_position_opened = True
+                        logger.warning("开仓失败，已标记为已尝试。如需重新开仓，请重启策略或等待触发条件")
             
             return True
             

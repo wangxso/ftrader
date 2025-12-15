@@ -59,6 +59,13 @@ class RandomForestStrategy(BaseStrategy):
         trading_params = config.get('trading_params', {})
         self.position_size = trading_params.get('position_size', 200.0)  # 每次开仓金额
         self.max_position = trading_params.get('max_position', 1)  # 最大持仓数
+        self.min_hold_time = trading_params.get('min_hold_time', 60)  # 最短持仓时间（秒），避免频繁交易
+        self.close_confidence_threshold = trading_params.get('close_confidence_threshold', None)  # 平仓置信度阈值，如果为None则使用confidence_threshold
+        self.close_cooldown = trading_params.get('close_cooldown', 30)  # 平仓后冷却时间（秒），避免立即反向开仓
+        
+        # 如果未设置平仓置信度阈值，使用开仓阈值的1.1倍（更保守）
+        if self.close_confidence_threshold is None:
+            self.close_confidence_threshold = self.confidence_threshold * 1.1
         
         # 策略状态
         self.model: Optional[RandomForestClassifier] = None
@@ -66,6 +73,8 @@ class RandomForestStrategy(BaseStrategy):
         self.last_retrain_time: Optional[datetime] = None
         self.last_prediction: Optional[Dict] = None
         self.current_position: Optional[Dict] = None
+        self.position_open_time: Optional[datetime] = None  # 持仓开仓时间
+        self.last_close_time: Optional[datetime] = None  # 上次平仓时间
         self.price_history: List[float] = []
         self.feature_history: List[List[float]] = []
         self.label_history: List[int] = []
@@ -509,6 +518,7 @@ class RandomForestStrategy(BaseStrategy):
                     'order_id': order.get('id'),
                     'size': self.position_size
                 }
+                self.position_open_time = datetime.utcnow()  # 记录开仓时间
                 
                 # 记录交易
                 self.record_trade(
@@ -572,7 +582,10 @@ class RandomForestStrategy(BaseStrategy):
                     order_id=''
                 )
                 
+                # 重置持仓状态
                 self.current_position = None
+                self.position_open_time = None
+                self.last_close_time = datetime.utcnow()  # 记录平仓时间
                 return True
             else:
                 logger.error("平仓失败")
@@ -721,17 +734,34 @@ class RandomForestStrategy(BaseStrategy):
                     
                     if has_position:
                         # 有持仓：检查是否需要平仓
-                        # 如果预测方向与持仓方向相反，且置信度高，考虑平仓
                         position_side = position.get('side', '').lower()
                         predicted_direction = prediction['direction']
                         
-                        should_close = False
-                        if position_side == 'long' and predicted_direction == 'down' and prediction['confidence'] > self.confidence_threshold:
-                            should_close = True
-                        elif position_side == 'short' and predicted_direction == 'up' and prediction['confidence'] > self.confidence_threshold:
-                            should_close = True
+                        # 检查持仓时间（避免刚开仓就平仓）
+                        can_close_by_time = True
+                        if self.position_open_time:
+                            hold_time = (datetime.utcnow() - self.position_open_time).total_seconds()
+                            if hold_time < self.min_hold_time:
+                                can_close_by_time = False
+                                logger.debug(
+                                    f"持仓时间过短 ({hold_time:.1f}秒 < {self.min_hold_time}秒)，"
+                                    f"暂不平仓，当前预测: {predicted_direction}, 置信度: {prediction['confidence']:.2f}"
+                                )
                         
-                        # 也检查风险管理
+                        should_close = False
+                        close_reason = ""
+                        
+                        # 如果预测方向与持仓方向相反，且置信度超过平仓阈值
+                        if position_side == 'long' and predicted_direction == 'down':
+                            if prediction['confidence'] > self.close_confidence_threshold and can_close_by_time:
+                                should_close = True
+                                close_reason = f"预测方向与持仓相反（down），置信度: {prediction['confidence']:.2f}"
+                        elif position_side == 'short' and predicted_direction == 'up':
+                            if prediction['confidence'] > self.close_confidence_threshold and can_close_by_time:
+                                should_close = True
+                                close_reason = f"预测方向与持仓相反（up），置信度: {prediction['confidence']:.2f}"
+                        
+                        # 也检查风险管理（风险管理不受时间限制）
                         balance = await loop.run_in_executor(None, self.exchange.get_balance)
                         balance_total = balance['total'] if balance else None
                         risk_should_close, risk_reason = self.risk_manager.should_close_position(
@@ -742,11 +772,22 @@ class RandomForestStrategy(BaseStrategy):
                             logger.warning(f"触发风险管理平仓: {risk_reason}")
                             await self.close_position(current_price)
                         elif should_close:
-                            logger.info(f"预测方向与持仓相反，平仓: {prediction}")
+                            logger.info(f"平仓: {close_reason}")
                             await self.close_position(current_price)
                     else:
                         # 无持仓：检查是否应该开仓
-                        if await self.should_open_position(prediction):
+                        # 检查平仓冷却时间（避免频繁反向开仓）
+                        can_open = True
+                        if self.last_close_time:
+                            time_since_close = (datetime.utcnow() - self.last_close_time).total_seconds()
+                            if time_since_close < self.close_cooldown:
+                                can_open = False
+                                logger.debug(
+                                    f"平仓冷却中 ({time_since_close:.1f}秒 < {self.close_cooldown}秒)，"
+                                    f"暂不开仓，当前预测: {prediction['direction']}, 置信度: {prediction['confidence']:.2f}"
+                                )
+                        
+                        if can_open and await self.should_open_position(prediction):
                             logger.info(f"预测信号: {prediction['direction']}, 置信度: {prediction['confidence']:.2f}")
                             await self.open_position(prediction['direction'], current_price)
             
