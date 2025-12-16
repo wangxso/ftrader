@@ -97,6 +97,7 @@ class RiskManager:
             是否触发止盈
         """
         if self.entry_price == 0:
+            logger.debug(f"止盈检查跳过: entry_price 为 0")
             return False
         
         take_profit_percent = self.config.take_profit_percent / 100.0
@@ -106,21 +107,31 @@ class RiskManager:
             price_rise = (current_price - self.entry_price) / self.entry_price
             if price_rise >= take_profit_percent:
                 logger.info(
-                    f"触发止盈！当前价格: {current_price:.2f}, "
+                    f"✅ 触发止盈！当前价格: {current_price:.2f}, "
                     f"开仓价格: {self.entry_price:.2f}, "
-                    f"涨幅: {price_rise*100:.2f}%"
+                    f"涨幅: {price_rise*100:.2f}% >= {self.config.take_profit_percent}%"
                 )
                 return True
+            else:
+                logger.debug(
+                    f"止盈检查: 当前涨幅 {price_rise*100:.2f}% < "
+                    f"止盈阈值 {self.config.take_profit_percent}%"
+                )
         else:
             # 做空：价格下跌超过止盈百分比
             price_drop = (self.entry_price - current_price) / self.entry_price
             if price_drop >= take_profit_percent:
                 logger.info(
-                    f"触发止盈！当前价格: {current_price:.2f}, "
+                    f"✅ 触发止盈！当前价格: {current_price:.2f}, "
                     f"开仓价格: {self.entry_price:.2f}, "
-                    f"跌幅: {price_drop*100:.2f}%"
+                    f"跌幅: {price_drop*100:.2f}% >= {self.config.take_profit_percent}%"
                 )
                 return True
+            else:
+                logger.debug(
+                    f"止盈检查: 当前跌幅 {price_drop*100:.2f}% < "
+                    f"止盈阈值 {self.config.take_profit_percent}%"
+                )
         
         return False
     
@@ -178,13 +189,13 @@ class RiskManager:
         Returns:
             (是否平仓, 原因)
         """
+        # 优先检查止盈（基于价格，不依赖余额）
+        if self.check_take_profit(current_price, side):
+            return True, "止盈"
+        
         # 检查止损
         if self.check_stop_loss(current_price, side):
             return True, "止损"
-        
-        # 检查止盈
-        if self.check_take_profit(current_price, side):
-            return True, "止盈"
         
         # 检查最大亏损（只有在余额获取成功时才检查）
         if current_balance is not None:

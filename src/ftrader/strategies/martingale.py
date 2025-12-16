@@ -228,6 +228,12 @@ class MartingaleStrategy(BaseStrategy):
                 balance = await loop.run_in_executor(None, self.exchange.get_balance)
                 if balance:
                     self.risk_manager.set_entry_price(self.entry_price, balance['total'])
+                    logger.info(
+                        f"已更新风险管理器: 开仓价格 {self.entry_price:.2f}, "
+                        f"开仓余额 {balance['total']:.2f} USDT, "
+                        f"止盈价格 {self.entry_price * (1 + self.take_profit_percent / 100):.2f}, "
+                        f"止损价格 {self.entry_price * (1 - self.stop_loss_percent / 100):.2f}"
+                    )
                 else:
                     logger.warning("开仓后无法获取余额，跳过更新风险管理器")
                 
@@ -369,6 +375,23 @@ class MartingaleStrategy(BaseStrategy):
             
             if has_position:
                 # 有持仓：检查止损止盈
+                # 先检查止盈（基于价格，不需要余额）
+                if self.risk_manager.entry_price > 0:
+                    # 计算当前价格相对于开仓价的变化
+                    if self.position_side == 'long':
+                        price_change = (current_price - self.risk_manager.entry_price) / self.risk_manager.entry_price * 100
+                    else:
+                        price_change = (self.risk_manager.entry_price - current_price) / self.risk_manager.entry_price * 100
+                    
+                    # 记录当前状态（用于调试）
+                    logger.debug(
+                        f"持仓检查: 当前价格 {current_price:.2f}, "
+                        f"开仓价格 {self.risk_manager.entry_price:.2f}, "
+                        f"价格变化 {price_change:.2f}%, "
+                        f"止盈阈值 {self.take_profit_percent}%, "
+                        f"止损阈值 {self.stop_loss_percent}%"
+                    )
+                
                 balance = await loop.run_in_executor(None, self.exchange.get_balance)
                 # 如果余额获取失败，使用None，避免误判
                 balance_total = balance['total'] if balance else None
@@ -376,9 +399,9 @@ class MartingaleStrategy(BaseStrategy):
                     current_price, balance_total, self.position_side
                 )
                 
-                # 如果余额获取失败，记录警告但继续运行
+                # 如果余额获取失败，记录警告但继续运行（止盈检查不依赖余额）
                 if balance is None:
-                    logger.warning("余额获取失败，跳过风险检查，继续运行策略")
+                    logger.warning("余额获取失败，但继续检查止损止盈（止盈不依赖余额）")
                 
                 if should_close:
                     logger.warning(f"触发平仓条件: {reason}")
