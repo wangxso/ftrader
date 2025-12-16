@@ -185,7 +185,8 @@ class BaseStrategy(ABC):
         self._notify_status_change("error")
     
     def record_trade(self, trade_type: str, side: str, symbol: str, price: float, 
-                    amount: float, order_id: Optional[str] = None, pnl: Optional[float] = None):
+                    amount: float, order_id: Optional[str] = None, pnl: Optional[float] = None,
+                    close_reason: Optional[str] = None):
         """
         记录交易
         
@@ -197,6 +198,7 @@ class BaseStrategy(ABC):
             amount: 数量（USDT）
             order_id: 订单ID
             pnl: 盈亏（平仓时）
+            close_reason: 平仓原因（止盈/止损/最大亏损限制，仅平仓时使用）
         """
         self.total_trades += 1
         if pnl is not None:
@@ -215,5 +217,9 @@ class BaseStrategy(ABC):
             'pnl': pnl,
             'timestamp': datetime.utcnow().isoformat(),
         }
+        
+        # 如果是平仓，记录平仓原因
+        if trade_type == 'close' and close_reason:
+            trade_data['close_reason'] = close_reason
         
         self._notify_trade(trade_data)

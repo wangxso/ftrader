@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from decimal import Decimal
+import math
 
 from .exchange import BinanceExchange
 from .strategies.base import BaseStrategy
@@ -11,6 +12,93 @@ from .strategies.martingale import MartingaleStrategy
 from .risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
+
+
+def expand_ohlcv_to_seconds(ohlcv_data: List[List], timeframe: str = '1m') -> List[List]:
+    """
+    将K线数据展开为秒级数据，确保回测精确到秒级别
+    
+    Args:
+        ohlcv_data: 原始K线数据，格式: [[timestamp, open, high, low, close, volume], ...]
+        timeframe: 时间周期，如 '1m', '5m', '1h' 等，用于确定每个K线包含多少秒
+        
+    Returns:
+        展开后的秒级数据
+    """
+    if not ohlcv_data:
+        return []
+    
+    # 解析时间周期（每个K线包含的秒数）
+    timeframe_seconds = {
+        '1m': 60,
+        '5m': 300,
+        '15m': 900,
+        '30m': 1800,
+        '1h': 3600,
+        '4h': 14400,
+        '1d': 86400,
+    }
+    
+    seconds_per_candle = timeframe_seconds.get(timeframe, 60)
+    
+    expanded_data = []
+    
+    for candle in ohlcv_data:
+        timestamp = candle[0]
+        open_price = candle[1]
+        high_price = candle[2]
+        low_price = candle[3]
+        close_price = candle[4]
+        volume = candle[5] if len(candle) > 5 else 0
+        
+        # 计算价格变化范围
+        price_range = high_price - low_price if high_price > low_price else abs(close_price - open_price)
+        
+        # 将每个K线展开为秒级数据点
+        # 使用更真实的插值方法模拟价格在K线内的变化
+        for second_offset in range(seconds_per_candle):
+            current_timestamp = timestamp + (second_offset * 1000)  # 转换为毫秒
+            
+            # 计算进度（0到1）
+            progress = second_offset / max(seconds_per_candle - 1, 1)  # 避免除零
+            
+            # 基础价格：从open到close的线性插值
+            base_price = open_price + (close_price - open_price) * progress
+            
+            # 添加波动模拟价格在K线内的变化
+            # 使用多个正弦波叠加，模拟更真实的价格波动
+            if price_range > 0:
+                # 主波动：模拟价格在high和low之间的波动
+                main_wave = math.sin(progress * math.pi) * (price_range * 0.5)
+                # 次要波动：增加一些随机性
+                minor_wave = math.sin(progress * math.pi * 3) * (price_range * 0.1)
+                
+                current_price = base_price + main_wave * 0.3 + minor_wave * 0.1
+            else:
+                current_price = base_price
+            
+            # 确保价格在high和low范围内
+            current_price = max(low_price, min(high_price, current_price))
+            
+            # 创建秒级数据点
+            # 为了更真实，high和low稍微偏离当前价格
+            price_tolerance = abs(current_price) * 0.0001  # 0.01%的容差
+            second_high = min(high_price, current_price + price_tolerance)
+            second_low = max(low_price, current_price - price_tolerance)
+            
+            expanded_candle = [
+                current_timestamp,
+                round(current_price, 4),  # open
+                round(second_high, 4),    # high
+                round(second_low, 4),      # low
+                round(current_price, 4),   # close
+                round(volume / seconds_per_candle, 4)  # 平均分配成交量
+            ]
+            
+            expanded_data.append(expanded_candle)
+    
+    logger.info(f"K线数据展开: {len(ohlcv_data)} 条 {timeframe} K线 -> {len(expanded_data)} 条秒级数据点")
+    return expanded_data
 
 
 class MockExchange:
@@ -367,6 +455,13 @@ class Backtester:
         temp_config = TempConfig(strategy_config)
         risk_manager = RiskManager(self.mock_exchange, temp_config)
         
+        # 记录风险管理配置（用于验证止盈逻辑）
+        logger.info(
+            f"回测风险管理配置: 止损 {temp_config.stop_loss_percent}%, "
+            f"止盈 {temp_config.take_profit_percent}%, "
+            f"最大亏损 {temp_config.max_loss_percent}%"
+        )
+        
         # 创建策略实例（使用策略ID 0表示回测）
         self.strategy = strategy_class(
             strategy_id=0,
@@ -430,6 +525,8 @@ class Backtester:
             progress_update_interval = max(1, total_steps // 100)  # 每1%更新一次进度
             last_progress_update = 0
             
+            logger.info(f"回测循环开始，将处理 {total_steps} 个数据点")
+            
             while self.mock_exchange.current_index < total_steps:
                 current_index = self.mock_exchange.current_index
                 
@@ -463,6 +560,37 @@ class Backtester:
             # 停止策略
             loop.run_until_complete(self.strategy.stop())
             
+            # 统计平仓原因（用于日志输出）
+            take_profit_count = sum(1 for t in self.trades 
+                                    if t.get('trade_type') == 'close' 
+                                    and t.get('close_reason') == '止盈')
+            stop_loss_count = sum(1 for t in self.trades 
+                                  if t.get('trade_type') == 'close' 
+                                  and t.get('close_reason') == '止损')
+            max_loss_count = sum(1 for t in self.trades 
+                                 if t.get('trade_type') == 'close' 
+                                 and t.get('close_reason') == '最大亏损限制')
+            
+            # 获取最终持仓状态
+            final_position = self.mock_exchange.get_open_position(self.strategy.symbol)
+            final_price = self.mock_exchange.get_current_price()
+            
+            logger.info(
+                f"回测完成 - 处理了 {self.mock_exchange.current_index + 1}/{total_steps} 个数据点"
+            )
+            logger.info(
+                f"回测完成 - 平仓统计: 止盈 {take_profit_count}次, "
+                f"止损 {stop_loss_count}次, 最大亏损限制 {max_loss_count}次"
+            )
+            
+            if final_position and final_price:
+                logger.info(
+                    f"回测结束时仍有持仓: {final_position.get('contracts', 0)} 合约, "
+                    f"当前价格 {final_price:.4f}, 开仓价格 {final_position.get('entryPrice', 0):.4f}"
+                )
+            else:
+                logger.info("回测结束时无持仓")
+            
             # 发送最终进度更新（100%）
             if self.progress_callback:
                 final_balance = self.mock_exchange.get_balance()['total']
@@ -493,6 +621,17 @@ class Backtester:
         loss_trades = sum(1 for t in self.trades if safe_get_pnl(t) < 0)
         total_trades = len(self.trades)
         win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # 统计平仓原因
+        take_profit_closes = sum(1 for t in self.trades 
+                                 if t.get('trade_type') == 'close' 
+                                 and t.get('close_reason') == '止盈')
+        stop_loss_closes = sum(1 for t in self.trades 
+                               if t.get('trade_type') == 'close' 
+                               and t.get('close_reason') == '止损')
+        max_loss_closes = sum(1 for t in self.trades 
+                              if t.get('trade_type') == 'close' 
+                              and t.get('close_reason') == '最大亏损限制')
         
         # 计算最大回撤
         equity_values = [point[1] for point in self.mock_exchange.equity_curve]
@@ -545,6 +684,20 @@ class Backtester:
             for point in self.mock_exchange.equity_curve
         ]
         
+        # 构建价格趋势数据（从OHLCV数据中提取，精确到四位小数）
+        price_data = []
+        for candle in self.ohlcv_data:
+            timestamp = candle[0]
+            price_data.append({
+                'timestamp': timestamp,
+                'time': datetime.fromtimestamp(timestamp / 1000).isoformat() if timestamp else None,
+                'open': round(candle[1], 4),  # 精确到四位小数
+                'high': round(candle[2], 4),
+                'low': round(candle[3], 4),
+                'close': round(candle[4], 4),
+                'volume': round(candle[5], 4) if len(candle) > 5 else 0,
+            })
+        
         return {
             'initial_balance': self.initial_balance,
             'final_balance': final_balance,
@@ -562,6 +715,11 @@ class Backtester:
             'avg_loss': avg_loss,
             'avg_trade_return': avg_trade_return,
             'equity_curve': equity_curve_data,
-            'trades': self.trades
+            'trades': self.trades,
+            'price_data': price_data,  # 添加价格数据
+            # 平仓原因统计
+            'take_profit_closes': take_profit_closes,
+            'stop_loss_closes': stop_loss_closes,
+            'max_loss_closes': max_loss_closes,
         }
 

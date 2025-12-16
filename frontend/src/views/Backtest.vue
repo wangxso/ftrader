@@ -223,6 +223,17 @@
           </el-col>
         </el-row>
 
+        <!-- 价格趋势图 -->
+        <el-card style="margin-top: 20px">
+          <template #header>
+            <span>价格趋势图</span>
+          </template>
+          <div v-if="detail.price_data && detail.price_data.length > 0">
+            <div ref="priceChartRef" style="width: 100%; height: 500px"></div>
+          </div>
+          <el-empty v-else description="暂无价格数据（此回测结果可能是在添加价格趋势功能之前创建的）" />
+        </el-card>
+
         <!-- 权益曲线图表 -->
         <el-card style="margin-top: 20px">
           <template #header>
@@ -246,7 +257,7 @@
             <el-table-column prop="side" label="方向" width="80" />
             <el-table-column prop="symbol" label="交易对" width="150" />
             <el-table-column prop="price" label="价格" width="120">
-              <template #default="{ row }">{{ row.price?.toFixed(2) }}</template>
+              <template #default="{ row }">{{ row.price?.toFixed(4) }}</template>
             </el-table-column>
             <el-table-column prop="amount" label="数量" width="120">
               <template #default="{ row }">{{ row.amount?.toFixed(2) }}</template>
@@ -289,7 +300,9 @@ const results = ref<BacktestResult[]>([])
 const showDetailDialog = ref(false)
 const detail = ref<BacktestDetail | null>(null)
 const equityChartRef = ref<HTMLElement | null>(null)
+const priceChartRef = ref<HTMLElement | null>(null)
 let equityChart: echarts.ECharts | null = null
+let priceChart: echarts.ECharts | null = null
 
 // 回测进度
 const currentBacktestProgress = ref<{
@@ -318,6 +331,16 @@ onMounted(async () => {
 onUnmounted(() => {
   // 清理WebSocket监听
   wsClient.off('backtest_progress', handleBacktestProgress)
+  
+  // 清理图表
+  if (equityChart) {
+    equityChart.dispose()
+    equityChart = null
+  }
+  if (priceChart) {
+    priceChart.dispose()
+    priceChart = null
+  }
 })
 
 const handleBacktestProgress = (data: any) => {
@@ -398,11 +421,26 @@ const runBacktest = async () => {
 const viewDetail = async (id: number) => {
   try {
     detail.value = await backtestApi.getDetail(id)
+    console.log('回测详情数据:', detail.value)
+    console.log('价格数据:', detail.value?.price_data)
+    console.log('价格数据类型:', typeof detail.value?.price_data)
+    console.log('价格数据长度:', detail.value?.price_data?.length)
+    
+    if (detail.value?.price_data) {
+      console.log('价格数据前3条:', detail.value.price_data.slice(0, 3))
+    }
+    
     showDetailDialog.value = true
     await nextTick()
     renderEquityChart()
+    if (detail.value?.price_data && detail.value.price_data.length > 0) {
+      renderPriceChart()
+    } else {
+      console.warn('价格数据为空或不存在，无法渲染价格趋势图')
+    }
   } catch (error: any) {
     ElMessage.error('加载回测详情失败: ' + (error.message || '未知错误'))
+    console.error('加载回测详情错误:', error)
   }
 }
 
@@ -419,6 +457,158 @@ const deleteResult = async (id: number) => {
       ElMessage.error('删除失败: ' + (error.message || '未知错误'))
     }
   }
+}
+
+const renderPriceChart = () => {
+  if (!priceChartRef.value || !detail.value?.price_data || detail.value.price_data.length === 0) return
+
+  if (!priceChart) {
+    priceChart = echarts.init(priceChartRef.value)
+  }
+
+  const priceData = detail.value.price_data
+  const times = priceData.map((item) => {
+    if (item.time) return item.time
+    return new Date(item.timestamp).toLocaleString()
+  })
+
+  const option = {
+    title: {
+      text: `${detail.value.symbol} 价格趋势`,
+      left: 'center',
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: {
+        type: 'cross',
+      },
+      formatter: (params: any) => {
+        const param = params[0]
+        const data = priceData[param.dataIndex]
+        return `${param.name}<br/>
+          开盘: ${data.open.toFixed(4)}<br/>
+          最高: ${data.high.toFixed(4)}<br/>
+          最低: ${data.low.toFixed(4)}<br/>
+          收盘: ${data.close.toFixed(4)}<br/>
+          成交量: ${data.volume.toFixed(4)}`
+      },
+    },
+    legend: {
+      data: ['收盘价', '开盘价', '最高价', '最低价'],
+      top: 30,
+    },
+    grid: {
+      left: '3%',
+      right: '4%',
+      bottom: '3%',
+      containLabel: true,
+    },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: times,
+      axisLabel: {
+        rotate: 45,
+        formatter: (value: string) => {
+          // 如果数据点太多，只显示部分标签
+          if (times.length > 50) {
+            const index = times.indexOf(value)
+            if (index % Math.ceil(times.length / 20) !== 0) return ''
+          }
+          return value
+        },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      name: '价格',
+      scale: true,
+      axisLabel: {
+        formatter: (value: number) => value.toFixed(4), // 精确到四位小数
+      },
+    },
+    dataZoom: [
+      {
+        type: 'inside',
+        start: 0,
+        end: 100,
+      },
+      {
+        type: 'slider',
+        start: 0,
+        end: 100,
+      },
+    ],
+    series: [
+      {
+        name: '收盘价',
+        type: 'line',
+        data: priceData.map((item) => item.close),
+        smooth: true,
+        lineStyle: {
+          color: '#409EFF',
+          width: 2,
+        },
+        itemStyle: {
+          color: '#409EFF',
+        },
+        markPoint: {
+          data: [
+            { type: 'max', name: '最高价' },
+            { type: 'min', name: '最低价' },
+          ],
+        },
+      },
+      {
+        name: '开盘价',
+        type: 'line',
+        data: priceData.map((item) => item.open),
+        smooth: true,
+        lineStyle: {
+          color: '#67C23A',
+          width: 1,
+        },
+        itemStyle: {
+          color: '#67C23A',
+        },
+      },
+      {
+        name: '最高价',
+        type: 'line',
+        data: priceData.map((item) => item.high),
+        smooth: true,
+        lineStyle: {
+          color: '#F56C6C',
+          width: 1,
+          type: 'dashed',
+        },
+        itemStyle: {
+          color: '#F56C6C',
+        },
+      },
+      {
+        name: '最低价',
+        type: 'line',
+        data: priceData.map((item) => item.low),
+        smooth: true,
+        lineStyle: {
+          color: '#E6A23C',
+          width: 1,
+          type: 'dashed',
+        },
+        itemStyle: {
+          color: '#E6A23C',
+        },
+      },
+    ],
+  }
+
+  priceChart.setOption(option)
+  
+  // 窗口大小改变时重新调整图表
+  window.addEventListener('resize', () => {
+    priceChart?.resize()
+  })
 }
 
 const renderEquityChart = () => {
@@ -470,6 +660,11 @@ const renderEquityChart = () => {
   }
 
   equityChart.setOption(option)
+  
+  // 窗口大小改变时重新调整图表
+  window.addEventListener('resize', () => {
+    equityChart?.resize()
+  })
 }
 
 const getStatusType = (status: string) => {

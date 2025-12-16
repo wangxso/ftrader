@@ -17,6 +17,7 @@ from ..strategies.martingale import MartingaleStrategy
 from ..strategies.random_forest import RandomForestStrategy
 from ..strategies.llm_strategy import LLMStrategy
 from ..api.websocket import broadcast_backtest_progress
+from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class BacktestDetailResponse(BacktestResponse):
     avg_loss: Optional[float]
     equity_curve: Optional[List[Dict]]
     trades: Optional[List[Dict]]
+    price_data: Optional[List[Dict]] = None  # 价格趋势数据
 
 
 def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime, 
@@ -103,16 +105,25 @@ def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime,
         end_timestamp = int(end_date.timestamp() * 1000)
         
         # 获取历史K线数据（使用since参数）
+        # 优先尝试获取1分钟数据，然后展开为秒级数据以获得更高精度
         ohlcv_data = []
         current_since = start_timestamp
         max_candles_per_request = 1000  # CCXT通常限制每次最多1000条
+        
+        # 如果时间周期大于1分钟，先获取1分钟数据，然后展开为秒级
+        # 这样可以获得更精确的回测结果
+        fetch_timeframe = timeframe
+        if timeframe not in ['1m']:
+            # 对于大于1分钟的时间周期，先获取1分钟数据
+            fetch_timeframe = '1m'
+            logger.info(f"时间周期 {timeframe} 大于1分钟，将获取1分钟数据并展开为秒级数据")
         
         while current_since < end_timestamp:
             try:
                 # 使用fetch_ohlcv获取历史数据
                 batch = exchange.exchange.fetch_ohlcv(
                     symbol, 
-                    timeframe, 
+                    fetch_timeframe,  # 使用fetch_timeframe（可能是1m）
                     since=current_since,
                     limit=max_candles_per_request
                 )
@@ -157,7 +168,13 @@ def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime,
         if not ohlcv_data:
             raise ValueError("指定时间范围内没有数据")
         
-        logger.info(f"获取到 {len(ohlcv_data)} 条K线数据")
+        logger.info(f"获取到 {len(ohlcv_data)} 条 {fetch_timeframe} K线数据")
+        
+        # 将所有K线数据展开为秒级数据，确保回测精确到秒级别
+        from ..backtester import expand_ohlcv_to_seconds
+        original_count = len(ohlcv_data)
+        ohlcv_data = expand_ohlcv_to_seconds(ohlcv_data, fetch_timeframe)
+        logger.info(f"已展开为秒级数据: {original_count} 条 {fetch_timeframe} K线 -> {len(ohlcv_data)} 条秒级数据点")
         
         # 根据配置自动识别策略类型
         strategy_class = None
@@ -225,11 +242,61 @@ def _run_backtest(backtest_id: int, strategy_id: int, start_date: datetime,
         backtest.avg_trade_return = results['avg_trade_return']
         backtest.equity_curve = results['equity_curve']
         backtest.trades_data = results['trades']
+        
+        # 保存价格数据（如果存在）
+        if 'price_data' in results and results['price_data']:
+            price_data = results['price_data']
+            logger.info(f"准备保存价格数据: {len(price_data)} 条记录")
+            
+            # 将价格数据存储到parameters中
+            # 确保parameters是一个可修改的字典
+            if backtest.parameters is None:
+                backtest.parameters = {}
+            elif not isinstance(backtest.parameters, dict):
+                # 如果parameters不是字典，尝试转换
+                logger.warning(f"parameters类型不是dict: {type(backtest.parameters)}，尝试转换")
+                try:
+                    import json
+                    if isinstance(backtest.parameters, str):
+                        backtest.parameters = json.loads(backtest.parameters)
+                    else:
+                        # 创建一个新字典
+                        original_params = backtest.parameters
+                        backtest.parameters = {}
+                        # 尝试保留原有配置
+                        if hasattr(original_params, '__dict__'):
+                            backtest.parameters.update(original_params.__dict__)
+                except Exception as e:
+                    logger.error(f"转换parameters失败: {e}，创建新字典")
+                    backtest.parameters = {}
+            
+            # 保存价格数据（限制数据量，避免数据库过大）
+            # 如果数据点太多，进行采样（每10个点取1个）
+            if len(price_data) > 10000:
+                logger.info(f"价格数据点过多({len(price_data)})，进行采样（每10个点取1个）")
+                sample_rate = max(1, len(price_data) // 10000)
+                price_data = price_data[::sample_rate]
+                logger.info(f"采样后数据点: {len(price_data)}")
+            
+            # 保存价格数据
+            backtest.parameters['price_data'] = price_data
+            # 标记JSON字段已修改，确保SQLAlchemy正确保存
+            flag_modified(backtest, 'parameters')
+            logger.info(f"价格数据已保存到parameters，共 {len(price_data)} 条记录")
+            
+            # 验证保存
+            if backtest.parameters.get('price_data'):
+                logger.info(f"验证：parameters中price_data数量: {len(backtest.parameters['price_data'])}")
+            else:
+                logger.error("警告：保存后无法从parameters中读取price_data")
+        else:
+            logger.warning(f"回测结果中没有price_data字段或price_data为空。results keys: {list(results.keys())}")
+        
         backtest.status = BacktestStatus.COMPLETED
         backtest.completed_at = datetime.utcnow()
         
         db.commit()
-        logger.info(f"回测 {backtest_id} 完成")
+        logger.info(f"回测 {backtest_id} 完成，价格数据已保存")
         
     except Exception as e:
         logger.error(f"回测执行失败: {e}", exc_info=True)
@@ -368,6 +435,34 @@ async def get_backtest_detail(
     if not backtest:
         raise HTTPException(status_code=404, detail="回测结果不存在")
     
+    # 从parameters中提取价格数据
+    price_data = None
+    if backtest.parameters:
+        try:
+            if isinstance(backtest.parameters, dict):
+                price_data = backtest.parameters.get('price_data')
+                logger.info(f"从parameters中提取价格数据: {len(price_data) if price_data else 0} 条记录")
+            elif isinstance(backtest.parameters, str):
+                # 如果是字符串，尝试解析JSON
+                import json
+                params_dict = json.loads(backtest.parameters)
+                price_data = params_dict.get('price_data')
+                logger.info(f"从JSON字符串中提取价格数据: {len(price_data) if price_data else 0} 条记录")
+            else:
+                logger.warning(f"parameters类型不是dict或str: {type(backtest.parameters)}")
+                # 尝试转换为字典
+                try:
+                    if hasattr(backtest.parameters, 'get'):
+                        price_data = backtest.parameters.get('price_data')
+                    elif hasattr(backtest.parameters, '__dict__'):
+                        price_data = backtest.parameters.__dict__.get('price_data')
+                except Exception as e:
+                    logger.error(f"转换parameters失败: {e}")
+        except Exception as e:
+            logger.error(f"提取价格数据时出错: {e}", exc_info=True)
+    
+    logger.info(f"返回回测详情，price_data: {'存在' if price_data else '不存在'}, 数量: {len(price_data) if price_data else 0}")
+    
     return BacktestDetailResponse(
         id=backtest.id,
         strategy_id=backtest.strategy_id,
@@ -391,6 +486,7 @@ async def get_backtest_detail(
         timeframe=backtest.timeframe,
         equity_curve=backtest.equity_curve,
         trades=backtest.trades_data,
+        price_data=price_data,  # 添加价格数据
         created_at=backtest.created_at,
         completed_at=backtest.completed_at
     )

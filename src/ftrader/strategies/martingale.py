@@ -228,11 +228,19 @@ class MartingaleStrategy(BaseStrategy):
                 balance = await loop.run_in_executor(None, self.exchange.get_balance)
                 if balance:
                     self.risk_manager.set_entry_price(self.entry_price, balance['total'])
+                    # 计算止盈止损价格
+                    if self.position_side == 'long':
+                        take_profit_price = self.entry_price * (1 + self.take_profit_percent / 100)
+                        stop_loss_price = self.entry_price * (1 - self.stop_loss_percent / 100)
+                    else:
+                        take_profit_price = self.entry_price * (1 - self.take_profit_percent / 100)
+                        stop_loss_price = self.entry_price * (1 + self.stop_loss_percent / 100)
+                    
                     logger.info(
-                        f"已更新风险管理器: 开仓价格 {self.entry_price:.2f}, "
+                        f"已更新风险管理器: 开仓价格 {self.entry_price:.4f}, "
                         f"开仓余额 {balance['total']:.2f} USDT, "
-                        f"止盈价格 {self.entry_price * (1 + self.take_profit_percent / 100):.2f}, "
-                        f"止损价格 {self.entry_price * (1 - self.stop_loss_percent / 100):.2f}"
+                        f"止盈价格 {take_profit_price:.4f} ({self.take_profit_percent}%), "
+                        f"止损价格 {stop_loss_price:.4f} ({self.stop_loss_percent}%)"
                     )
                 else:
                     logger.warning("开仓后无法获取余额，跳过更新风险管理器")
@@ -271,51 +279,74 @@ class MartingaleStrategy(BaseStrategy):
             logger.warning(f"已达到最大加仓次数: {self.max_additions}")
             return False
         
-        # 检查加仓冷却时间
-        current_time = time.time()
-        if self.last_addition_time > 0:
-            time_since_last = current_time - self.last_addition_time
-            if time_since_last < self.addition_cooldown:
-                logger.debug(
-                    f"加仓冷却中: 距离上次加仓 {time_since_last:.1f}秒, "
-                    f"需要等待 {self.addition_cooldown}秒"
-                )
-                return False
+        # 检查加仓冷却时间（仅在非回测环境中生效）
+        # 在回测中，冷却时间检查会被跳过，因为回测使用模拟时间
+        # 通过检查exchange的类型来判断是否在回测中
+        # MockExchange 类名包含 'Mock'，或者检查是否有 ohlcv_data 属性
+        is_backtest = (
+            'Mock' in type(self.exchange).__name__ or
+            hasattr(self.exchange, 'ohlcv_data') or
+            hasattr(self.exchange, 'current_index')
+        )
         
-        # 检查价格变化是否足够（避免微小波动触发）
-        if self.last_addition_price > 0:
-            if self.position_side == 'long':
-                # 做多：检查价格是否从上次加仓后继续下跌
-                price_change = (self.last_addition_price - current_price) / self.last_addition_price * 100
-            else:
-                # 做空：检查价格是否从上次加仓后继续上涨
-                price_change = (current_price - self.last_addition_price) / self.last_addition_price * 100
-            
-            # 如果价格变化小于阈值的一半，不触发（避免频繁小幅波动）
-            min_change = self.price_drop_percent * 0.3  # 至少需要阈值30%的变化
-            if abs(price_change) < min_change:
-                logger.debug(
-                    f"价格变化不足: {price_change:.2f}% < {min_change:.2f}%, "
-                    f"不触发加仓"
-                )
-                return False
+        if not is_backtest:
+            # 只在实盘交易中检查冷却时间
+            current_time = time.time()
+            if self.last_addition_time > 0:
+                time_since_last = current_time - self.last_addition_time
+                if time_since_last < self.addition_cooldown:
+                    logger.debug(
+                        f"加仓冷却中: 距离上次加仓 {time_since_last:.1f}秒, "
+                        f"需要等待 {self.addition_cooldown}秒"
+                    )
+                    return False
         
-        # 检查是否满足触发条件
+        # 检查是否满足触发条件（基于参考价格）
         if self.highest_price == 0:
             # 首次触发，记录当前价格作为参考
             self.highest_price = current_price
+            logger.info(
+                f"首次设置参考价格: {current_price:.4f} (方向: {self.position_side})"
+            )
             return True
         
-        # 检查触发条件
+        # 检查触发条件：价格从参考价格（最高价/最低价）变化是否超过阈值
         triggered = self.check_trigger_condition(current_price, self.highest_price)
         
         if triggered:
-            logger.debug(
-                f"触发加仓条件: 当前价格 {current_price:.2f}, "
-                f"参考价格 {self.highest_price:.2f}, "
-                f"方向 {self.position_side}, "
-                f"波动阈值 {self.price_drop_percent}%"
-            )
+            # 计算实际的价格变化百分比
+            if self.position_side == 'long':
+                price_drop = (self.highest_price - current_price) / self.highest_price * 100
+                logger.info(
+                    f"触发加仓条件: 当前价格 {current_price:.4f}, "
+                    f"参考价格（最高价） {self.highest_price:.4f}, "
+                    f"价格下跌 {price_drop:.2f}% >= 阈值 {self.price_drop_percent}%"
+                )
+            else:
+                price_rise = (current_price - self.highest_price) / self.highest_price * 100
+                logger.info(
+                    f"触发加仓条件: 当前价格 {current_price:.4f}, "
+                    f"参考价格（最低价） {self.highest_price:.4f}, "
+                    f"价格上涨 {price_rise:.2f}% >= 阈值 {self.price_drop_percent}%"
+                )
+        else:
+            # 记录为什么没有触发（用于调试）
+            if self.position_side == 'long':
+                price_drop = (self.highest_price - current_price) / self.highest_price * 100
+                if price_drop > 0:
+                    logger.debug(
+                        f"未触发加仓: 当前价格 {current_price:.4f}, "
+                        f"参考价格 {self.highest_price:.4f}, "
+                        f"价格下跌 {price_drop:.2f}% < 阈值 {self.price_drop_percent}%"
+                    )
+            else:
+                price_rise = (current_price - self.highest_price) / self.highest_price * 100
+                if price_rise > 0:
+                    logger.debug(
+                        f"未触发加仓: 当前价格 {current_price:.4f}, "
+                        f"参考价格 {self.highest_price:.4f}, "
+                        f"价格上涨 {price_rise:.2f}% < 阈值 {self.price_drop_percent}%"
+                    )
         
         return triggered
     
@@ -328,13 +359,26 @@ class MartingaleStrategy(BaseStrategy):
         """
         if self.position_side == 'long':
             # 做多：记录最高价（用于判断下跌）
+            # 只有当价格创新高时才更新，这样加仓条件基于从最高点的下跌
             if self.highest_price == 0 or current_price > self.highest_price:
+                old_price = self.highest_price
                 self.highest_price = current_price
+                if old_price > 0:
+                    logger.debug(
+                        f"更新参考价格（最高价）: {old_price:.4f} -> {current_price:.4f} "
+                        f"(上涨 {((current_price - old_price) / old_price * 100):.2f}%)"
+                    )
         else:
             # 做空：记录最低价（用于判断上涨）
-            # 只有在没有持仓或价格创新低时才更新，避免频繁触发
+            # 只有当价格创新低时才更新，这样加仓条件基于从最低点的上涨
             if self.highest_price == 0 or current_price < self.highest_price:
+                old_price = self.highest_price
                 self.highest_price = current_price
+                if old_price > 0:
+                    logger.debug(
+                        f"更新参考价格（最低价）: {old_price:.4f} -> {current_price:.4f} "
+                        f"(下跌 {((old_price - current_price) / old_price * 100):.2f}%)"
+                    )
     
     async def run_once(self) -> bool:
         """
@@ -380,17 +424,26 @@ class MartingaleStrategy(BaseStrategy):
                     # 计算当前价格相对于开仓价的变化
                     if self.position_side == 'long':
                         price_change = (current_price - self.risk_manager.entry_price) / self.risk_manager.entry_price * 100
+                        take_profit_price = self.risk_manager.entry_price * (1 + self.take_profit_percent / 100)
+                        stop_loss_price = self.risk_manager.entry_price * (1 - self.stop_loss_percent / 100)
                     else:
                         price_change = (self.risk_manager.entry_price - current_price) / self.risk_manager.entry_price * 100
+                        take_profit_price = self.risk_manager.entry_price * (1 - self.take_profit_percent / 100)
+                        stop_loss_price = self.risk_manager.entry_price * (1 + self.stop_loss_percent / 100)
                     
-                    # 记录当前状态（用于调试）
-                    logger.debug(
-                        f"持仓检查: 当前价格 {current_price:.2f}, "
-                        f"开仓价格 {self.risk_manager.entry_price:.2f}, "
-                        f"价格变化 {price_change:.2f}%, "
-                        f"止盈阈值 {self.take_profit_percent}%, "
-                        f"止损阈值 {self.stop_loss_percent}%"
-                    )
+                    # 记录当前状态（用于调试，每10次检查记录一次，避免日志过多）
+                    if not hasattr(self, '_check_count'):
+                        self._check_count = 0
+                    self._check_count += 1
+                    
+                    if self._check_count % 10 == 0 or abs(price_change) >= self.take_profit_percent * 0.8:
+                        logger.info(
+                            f"持仓检查: 当前价格 {current_price:.4f}, "
+                            f"开仓价格 {self.risk_manager.entry_price:.4f}, "
+                            f"价格变化 {price_change:.2f}%, "
+                            f"止盈价格 {take_profit_price:.4f} ({self.take_profit_percent}%), "
+                            f"止损价格 {stop_loss_price:.4f} ({self.stop_loss_percent}%)"
+                        )
                 
                 balance = await loop.run_in_executor(None, self.exchange.get_balance)
                 # 如果余额获取失败，使用None，避免误判
@@ -423,7 +476,7 @@ class MartingaleStrategy(BaseStrategy):
                             pnl = None
                             pnl_percent = None
                         
-                        # 记录交易
+                        # 记录交易（包含平仓原因）
                         self.record_trade(
                             trade_type='close',
                             side=self.position_side,
@@ -431,7 +484,8 @@ class MartingaleStrategy(BaseStrategy):
                             price=current_price,
                             amount=0,  # 平仓时数量为0
                             pnl=pnl,
-                            order_id=''
+                            order_id='',
+                            close_reason=reason  # 记录平仓原因（止盈/止损/最大亏损限制）
                         )
                         
                         # 重置策略状态，允许继续交易
@@ -458,25 +512,38 @@ class MartingaleStrategy(BaseStrategy):
                     addition_number = self.addition_count + 1
                     size = self.calculate_position_size(addition_number)
                     
-                    logger.info(
-                        f"触发加仓条件 (第{addition_number}次加仓): "
-                        f"当前价格 {current_price:.2f}, "
-                        f"参考价格 {self.highest_price:.2f}, "
-                        f"加仓大小 {size:.2f} USDT"
-                    )
+                    # 计算价格变化百分比（用于日志）
+                    if self.position_side == 'long':
+                        price_drop = (self.highest_price - current_price) / self.highest_price * 100
+                        logger.info(
+                            f"触发加仓条件 (第{addition_number}次加仓): "
+                            f"当前价格 {current_price:.4f}, "
+                            f"参考价格（最高价） {self.highest_price:.4f}, "
+                            f"价格下跌 {price_drop:.2f}% >= 阈值 {self.price_drop_percent}%, "
+                            f"加仓大小 {size:.2f} USDT"
+                        )
+                    else:
+                        price_rise = (current_price - self.highest_price) / self.highest_price * 100
+                        logger.info(
+                            f"触发加仓条件 (第{addition_number}次加仓): "
+                            f"当前价格 {current_price:.4f}, "
+                            f"参考价格（最低价） {self.highest_price:.4f}, "
+                            f"价格上涨 {price_rise:.2f}% >= 阈值 {self.price_drop_percent}%, "
+                            f"加仓大小 {size:.2f} USDT"
+                        )
                     
                     if await self.open_position(size, current_price):
                         self.addition_count = addition_number
                         # 记录加仓时间和价格
                         self.last_addition_time = time.time()
                         self.last_addition_price = current_price
-                        # 加仓后，对于做空策略，保持最低价作为参考（不重置）
-                        # 对于做多策略，保持最高价作为参考（不重置）
-                        # 这样避免频繁触发加仓
-                        # 参考价格会在 update_reference_price 中自然更新
-                        logger.debug(
-                            f"加仓成功，当前参考价格: {self.highest_price:.2f}, "
-                            f"下次加仓需等待 {self.addition_cooldown}秒"
+                        # 加仓后，保持参考价格不变（不重置）
+                        # 这样下次加仓需要价格继续变化超过阈值
+                        # 参考价格会在 update_reference_price 中自然更新（当价格创新高/新低时）
+                        logger.info(
+                            f"加仓成功 (第{addition_number}次), "
+                            f"当前参考价格: {self.highest_price:.4f}, "
+                            f"加仓价格: {current_price:.4f}"
                         )
                     else:
                         logger.error("加仓失败")

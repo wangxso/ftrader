@@ -37,6 +37,15 @@ export interface BacktestDetail extends BacktestResult {
   avg_loss?: number
   equity_curve?: Array<{ timestamp: number; balance: number; time?: string }>
   trades?: Array<any>
+  price_data?: Array<{
+    timestamp: number
+    time?: string
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+  }>
 }
 
 export const backtestApi = {
