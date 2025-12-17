@@ -20,10 +20,13 @@ export const accountApi = {
   },
 
   // 获取交易历史
-  getHistory: async (strategyId?: number, skip = 0, limit = 100) => {
+  getHistory: async (strategyId?: number, strategyRunId?: number, skip = 0, limit = 100) => {
     const params: any = { skip, limit }
     if (strategyId) {
       params.strategy_id = strategyId
+    }
+    if (strategyRunId) {
+      params.strategy_run_id = strategyRunId
     }
     const response = await apiClient.get('/account/history', { params })
     return response.data

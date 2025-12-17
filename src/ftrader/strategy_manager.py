@@ -197,9 +197,16 @@ class StrategyManager:
         """策略交易回调"""
         db = SessionLocal()
         try:
+            # 获取当前运行记录
+            run = db.query(StrategyRun).filter(
+                StrategyRun.strategy_id == strategy_id,
+                StrategyRun.status == StrategyStatus.RUNNING
+            ).order_by(StrategyRun.started_at.desc()).first()
+            
             # 保存交易记录
             trade = Trade(
                 strategy_id=strategy_id,
+                strategy_run_id=run.id if run else None,  # 关联到运行记录
                 trade_type=TradeType(trade_data['trade_type']),
                 side=TradeSide(trade_data['side']),
                 symbol=trade_data['symbol'],
@@ -211,6 +218,26 @@ class StrategyManager:
                 executed_at=datetime.fromisoformat(trade_data['timestamp'].replace('Z', '+00:00'))
             )
             db.add(trade)
+            
+            # 更新运行记录的交易统计
+            if run:
+                if run.total_trades is None:
+                    run.total_trades = 0
+                if run.win_trades is None:
+                    run.win_trades = 0
+                if run.loss_trades is None:
+                    run.loss_trades = 0
+                
+                run.total_trades += 1
+                
+                # 处理 pnl，确保不是 None
+                pnl = trade_data.get('pnl')
+                if pnl is not None:
+                    if pnl > 0:
+                        run.win_trades += 1
+                    elif pnl < 0:
+                        run.loss_trades += 1
+            
             db.commit()
             
             # 更新或创建持仓记录
@@ -297,33 +324,6 @@ class StrategyManager:
                         pass
                     db.commit()
             
-            # 更新策略运行统计
-            run = db.query(StrategyRun).filter(
-                StrategyRun.strategy_id == strategy_id,
-                StrategyRun.status == StrategyStatus.RUNNING
-            ).order_by(StrategyRun.started_at.desc()).first()
-            
-            if run:
-                # 确保字段不为 None，如果是 None 则初始化为 0
-                if run.total_trades is None:
-                    run.total_trades = 0
-                if run.win_trades is None:
-                    run.win_trades = 0
-                if run.loss_trades is None:
-                    run.loss_trades = 0
-                
-                run.total_trades += 1
-                
-                # 处理 pnl，确保不是 None
-                pnl = trade_data.get('pnl')
-                if pnl is not None:
-                    if pnl > 0:
-                        run.win_trades += 1
-                    elif pnl < 0:
-                        run.loss_trades += 1
-                
-                db.commit()
-            
             # 调用外部回调
             if self.on_strategy_trade:
                 self.on_strategy_trade(strategy_id, trade_data)
@@ -391,6 +391,54 @@ class StrategyManager:
                 logger.error(f"创建策略实例失败: {strategy_id}")
                 return False
             
+            # 确保策略状态完全重置，不继承旧持仓
+            # 检查是否有旧持仓，如果有则清理（确保新启动的策略是全新的）
+            try:
+                exchange = self.exchanges[strategy_id]
+                symbol = strategy_instance.symbol
+                
+                # 检查是否有持仓
+                old_position = exchange.get_open_position(symbol)
+                if old_position:
+                    contracts = abs(old_position.get('contracts', 0))
+                    if contracts > 0:
+                        logger.warning(
+                            f"检测到旧持仓: {symbol} {contracts} 合约, "
+                            f"方向 {old_position.get('side', 'unknown')}, "
+                            f"将在启动前清理"
+                        )
+                        # 清理旧持仓（平仓）
+                        closed = exchange.close_position(symbol)
+                        if closed:
+                            logger.info(f"已清理旧持仓: {symbol}")
+                        else:
+                            logger.warning(f"清理旧持仓失败: {symbol}，但继续启动策略")
+            except Exception as e:
+                logger.warning(f"检查旧持仓时出错: {e}，继续启动策略")
+            
+            # 重置策略内部状态（确保不继承旧状态）
+            if hasattr(strategy_instance, 'entry_price'):
+                strategy_instance.entry_price = 0.0
+            if hasattr(strategy_instance, 'highest_price'):
+                strategy_instance.highest_price = 0.0
+            if hasattr(strategy_instance, 'addition_count'):
+                strategy_instance.addition_count = 0
+            if hasattr(strategy_instance, 'positions'):
+                strategy_instance.positions = []
+            if hasattr(strategy_instance, 'initial_position_opened'):
+                strategy_instance.initial_position_opened = False
+            if hasattr(strategy_instance, 'last_addition_time'):
+                strategy_instance.last_addition_time = 0.0
+            if hasattr(strategy_instance, 'last_addition_price'):
+                strategy_instance.last_addition_price = 0.0
+            
+            # 重置风险管理器状态
+            if hasattr(strategy_instance, 'risk_manager'):
+                strategy_instance.risk_manager.entry_price = 0.0
+                strategy_instance.risk_manager.entry_balance = 0.0
+            
+            logger.info(f"策略状态已重置，确保新启动的策略不继承旧持仓")
+            
             # 设置回调
             strategy_instance.on_status_change = self._strategy_status_callback
             strategy_instance.on_trade = self._strategy_trade_callback
@@ -426,12 +474,13 @@ class StrategyManager:
         finally:
             db.close()
     
-    async def stop_strategy(self, strategy_id: int) -> bool:
+    async def stop_strategy(self, strategy_id: int, close_positions: bool = True) -> bool:
         """
         停止策略
         
         Args:
             strategy_id: 策略ID
+            close_positions: 是否在停止前平仓，默认为True
             
         Returns:
             是否成功停止
@@ -439,10 +488,19 @@ class StrategyManager:
         # 如果策略在运行中，先停止它
         if strategy_id in self.strategies:
             try:
-                # 停止策略实例
+                # 停止策略实例（会自动平仓）
                 strategy_instance = self.strategies[strategy_id]
-                strategy_instance.is_active = False
                 strategy_instance.is_running = False
+                
+                # 调用策略的stop方法（会自动平仓）
+                # 检查策略是否支持 close_positions 参数
+                import inspect
+                stop_signature = inspect.signature(strategy_instance.stop)
+                if 'close_positions' in stop_signature.parameters:
+                    await strategy_instance.stop(close_positions=close_positions)
+                else:
+                    # 如果策略不支持 close_positions 参数，使用默认调用
+                    await strategy_instance.stop()
                 
                 # 取消任务
                 task = self.strategy_tasks.get(strategy_id)
@@ -490,10 +548,30 @@ class StrategyManager:
                     except Exception as e:
                         logger.warning(f"获取余额失败: {e}")
                 
+                # 统计本次运行的交易数据
+                from .models.trade import Trade, TradeType
+                trades = db.query(Trade).filter(
+                    Trade.strategy_id == strategy_id,
+                    Trade.executed_at >= run.started_at
+                ).all()
+                
+                total_trades = len(trades)
+                win_trades = sum(1 for t in trades if t.pnl and t.pnl > 0)
+                loss_trades = sum(1 for t in trades if t.pnl and t.pnl < 0)
+                
                 run.status = StrategyStatus.STOPPED
                 run.current_balance = balance['total'] if balance else run.start_balance
+                run.total_trades = total_trades
+                run.win_trades = win_trades
+                run.loss_trades = loss_trades
                 run.stopped_at = datetime.utcnow()
-                logger.info(f"更新策略运行记录为已停止: {strategy_id}")
+                
+                logger.info(
+                    f"更新策略运行记录为已停止: {strategy_id}, "
+                    f"交易统计: 总交易 {total_trades} 次, "
+                    f"盈利 {win_trades} 次, 亏损 {loss_trades} 次, "
+                    f"余额: {run.start_balance:.2f} -> {run.current_balance:.2f} USDT"
+                )
             
             db.commit()
             logger.info(f"策略已停止: {strategy_id}")

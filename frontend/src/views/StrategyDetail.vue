@@ -258,19 +258,29 @@ const loadData = async () => {
     loading.value = true
     console.log('开始加载数据，策略ID:', strategyId)
     
-    // 并行加载主要数据
-    const [strategyData, tradesData, statusData] = await Promise.all([
+    // 先获取策略状态（包含当前运行记录ID）
+    const [strategyData, statusData] = await Promise.all([
       strategiesApi.getById(strategyId),
-      accountApi.getHistory(strategyId, 0, 100),
       strategiesApi.getStatus(strategyId)
     ])
     
     strategy.value = strategyData
-    trades.value = tradesData
     status.value = statusData
     
+    // 如果策略正在运行，只获取当前运行记录的交易
+    // 否则获取所有该策略的交易记录
+    const currentRunId = statusData.current_run_id
+    const tradesData = await accountApi.getHistory(
+      strategyId,
+      currentRunId || undefined,  // 如果策略正在运行，只查询当前运行记录的交易
+      0,
+      100
+    )
+    
+    trades.value = tradesData
+    
     console.log('策略数据:', strategy.value)
-    console.log('交易记录:', trades.value)
+    console.log('交易记录:', trades.value, '当前运行记录ID:', currentRunId)
     console.log('策略状态:', status.value)
     
     // 更新交易记录的实时盈亏（在更新图表之前）
@@ -438,11 +448,66 @@ const startStrategy = async () => {
 
 const stopStrategy = async () => {
   try {
-    await strategiesApi.stop(strategyId)
-    ElMessage.success('策略已停止')
+    // 获取策略状态（包含持仓信息）
+    const status = await strategiesApi.getStatus(strategyId)
+    const position = status.position
+    
+    // 如果有持仓，显示二次确认对话框
+    if (position && position.contracts > 0) {
+      const positionInfo = `
+交易对: ${position.symbol}
+方向: ${position.side === 'long' ? '做多' : '做空'}
+持仓数量: ${position.contracts.toFixed(4)} 合约
+开仓价格: ${position.entry_price.toFixed(4)}
+当前价格: ${position.current_price.toFixed(4)}
+未实现盈亏: ${position.unrealized_pnl ? position.unrealized_pnl.toFixed(2) : 'N/A'} USDT
+未实现盈亏率: ${position.unrealized_pnl_percent ? position.unrealized_pnl_percent.toFixed(2) : 'N/A'}%
+      `.trim()
+      
+      // 第一次确认
+      await ElMessageBox.confirm(
+        `停止策略将自动平仓当前持仓！\n\n持仓信息：\n${positionInfo}\n\n是否确认停止策略并平仓？`,
+        '确认停止策略',
+        {
+          confirmButtonText: '确认停止并平仓',
+          cancelButtonText: '取消',
+          type: 'warning',
+          dangerouslyUseHTMLString: false,
+        }
+      )
+      
+      // 第二次确认（更严格的警告）
+      await ElMessageBox.confirm(
+        `⚠️ 最后确认：停止策略将立即平仓所有持仓！\n\n此操作不可撤销，请再次确认。`,
+        '最后确认',
+        {
+          confirmButtonText: '确认停止',
+          cancelButtonText: '取消',
+          type: 'error',
+          dangerouslyUseHTMLString: false,
+        }
+      )
+    } else {
+      // 无持仓，只显示一次确认
+      await ElMessageBox.confirm(
+        '确定要停止此策略吗？',
+        '确认停止策略',
+        {
+          confirmButtonText: '确认停止',
+          cancelButtonText: '取消',
+          type: 'warning',
+        }
+      )
+    }
+    
+    // 执行停止
+    await strategiesApi.stop(strategyId, true)
+    ElMessage.success('策略已停止' + (position && position.contracts > 0 ? '，持仓已平仓' : ''))
     await loadData()
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '停止策略失败')
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '停止策略失败')
+    }
   }
 }
 

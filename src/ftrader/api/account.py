@@ -281,6 +281,7 @@ async def get_strategy_positions(strategy_id: int, db: Session = Depends(get_db)
 @router.get("/history", response_model=List[TradeResponse])
 async def get_trade_history(
     strategy_id: Optional[int] = None,
+    strategy_run_id: Optional[int] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db)
@@ -292,8 +293,12 @@ async def get_trade_history(
         if strategy_id:
             query = query.filter(Trade.strategy_id == strategy_id)
         
+        # 如果指定了 strategy_run_id，只返回该运行记录的交易
+        if strategy_run_id:
+            query = query.filter(Trade.strategy_run_id == strategy_run_id)
+        
         trades = query.order_by(Trade.executed_at.desc()).offset(skip).limit(limit).all()
-        logger.debug(f"查询到 {len(trades)} 条交易记录 (strategy_id={strategy_id}, skip={skip}, limit={limit})")
+        logger.debug(f"查询到 {len(trades)} 条交易记录 (strategy_id={strategy_id}, strategy_run_id={strategy_run_id}, skip={skip}, limit={limit})")
         return trades
     except Exception as e:
         logger.error(f"获取交易历史失败: {e}", exc_info=True)

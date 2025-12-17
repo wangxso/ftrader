@@ -462,6 +462,37 @@ class BinanceExchange:
                 logger.error(f"市场信息: precision={market.get('precision', {})}")
                 return None
             
+            # 检查最小数量精度（在检查名义价值之前）
+            limits = market.get('limits', {})
+            amount_limits = limits.get('amount', {})
+            min_amount = amount_limits.get('min')
+            
+            # 如果市场信息中没有最小数量，从precision中获取
+            if min_amount is None or min_amount <= 0:
+                precision = market.get('precision', {})
+                amount_precision = precision.get('amount')
+                if amount_precision:
+                    if isinstance(amount_precision, str):
+                        min_amount = float(amount_precision)
+                    else:
+                        # 如果是数字，表示小数位数，计算最小步长
+                        min_amount = 10 ** (-int(amount_precision))
+                else:
+                    # 默认最小精度为 0.001
+                    min_amount = 0.001
+            
+            if contracts < min_amount:
+                logger.error(
+                    f"订单数量 {contracts} 小于最小精度 {min_amount}。"
+                    f"原始金额: {amount} USDT, 价格: {price}, 合约大小: {contract_size}, "
+                    f"计算出的合约数量: {contracts}"
+                )
+                logger.error(
+                    f"建议增加订单金额到至少 {min_amount * price * contract_size * 1.1:.2f} USDT "
+                    f"以满足最小精度要求"
+                )
+                return None
+            
             # 检查订单名义价值
             notional_value = contracts * price * contract_size
             

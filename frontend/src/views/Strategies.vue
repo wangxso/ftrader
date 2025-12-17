@@ -217,11 +217,66 @@ const startStrategy = async (id: number) => {
 
 const stopStrategy = async (id: number) => {
   try {
-    await strategiesApi.stop(id)
-    ElMessage.success('策略已停止')
+    // 获取策略状态（包含持仓信息）
+    const status = await strategiesApi.getStatus(id)
+    const position = status.position
+    
+    // 如果有持仓，显示二次确认对话框
+    if (position && position.contracts > 0) {
+      const positionInfo = `
+交易对: ${position.symbol}
+方向: ${position.side === 'long' ? '做多' : '做空'}
+持仓数量: ${position.contracts.toFixed(4)} 合约
+开仓价格: ${position.entry_price.toFixed(4)}
+当前价格: ${position.current_price.toFixed(4)}
+未实现盈亏: ${position.unrealized_pnl ? position.unrealized_pnl.toFixed(2) : 'N/A'} USDT
+未实现盈亏率: ${position.unrealized_pnl_percent ? position.unrealized_pnl_percent.toFixed(2) : 'N/A'}%
+      `.trim()
+      
+      // 第一次确认
+      await ElMessageBox.confirm(
+        `停止策略将自动平仓当前持仓！\n\n持仓信息：\n${positionInfo}\n\n是否确认停止策略并平仓？`,
+        '确认停止策略',
+        {
+          confirmButtonText: '确认停止并平仓',
+          cancelButtonText: '取消',
+          type: 'warning',
+          dangerouslyUseHTMLString: false,
+        }
+      )
+      
+      // 第二次确认（更严格的警告）
+      await ElMessageBox.confirm(
+        `⚠️ 最后确认：停止策略将立即平仓所有持仓！\n\n此操作不可撤销，请再次确认。`,
+        '最后确认',
+        {
+          confirmButtonText: '确认停止',
+          cancelButtonText: '取消',
+          type: 'error',
+          dangerouslyUseHTMLString: false,
+        }
+      )
+    } else {
+      // 无持仓，只显示一次确认
+      await ElMessageBox.confirm(
+        '确定要停止此策略吗？',
+        '确认停止策略',
+        {
+          confirmButtonText: '确认停止',
+          cancelButtonText: '取消',
+          type: 'warning',
+        }
+      )
+    }
+    
+    // 执行停止
+    await strategiesApi.stop(id, true)
+    ElMessage.success('策略已停止' + (position && position.contracts > 0 ? '，持仓已平仓' : ''))
     loadStrategies()
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '停止策略失败')
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '停止策略失败')
+    }
   }
 }
 

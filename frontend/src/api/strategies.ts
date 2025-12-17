@@ -37,8 +37,10 @@ export const strategiesApi = {
   },
 
   // 停止策略
-  stop: async (id: number): Promise<void> => {
-    await apiClient.post(`/strategies/${id}/stop`)
+  stop: async (id: number, closePositions: boolean = true): Promise<void> => {
+    await apiClient.post(`/strategies/${id}/stop`, null, {
+      params: { close_positions: closePositions }
+    })
   },
 
   // 获取策略状态
@@ -57,6 +59,14 @@ export const strategiesApi = {
   getPriceHistory: async (id: number, timeframe = '1m', limit = 100): Promise<any[]> => {
     const response = await apiClient.get(`/strategies/${id}/price-history`, {
       params: { timeframe, limit }
+    })
+    return response.data
+  },
+
+  // 获取所有策略运行记录（历史策略）
+  getAllRuns: async (skip = 0, limit = 100): Promise<any[]> => {
+    const response = await apiClient.get('/strategies/runs/all', {
+      params: { skip, limit }
     })
     return response.data
   },

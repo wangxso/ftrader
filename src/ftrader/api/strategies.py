@@ -192,8 +192,18 @@ async def start_strategy(strategy_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{strategy_id}/stop")
-async def stop_strategy(strategy_id: int, db: Session = Depends(get_db)):
-    """停止策略"""
+async def stop_strategy(
+    strategy_id: int, 
+    close_positions: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    停止策略
+    
+    Args:
+        strategy_id: 策略ID
+        close_positions: 是否在停止前平仓，默认为True
+    """
     strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
@@ -203,7 +213,7 @@ async def stop_strategy(strategy_id: int, db: Session = Depends(get_db)):
         return {"message": "策略未在运行，无需停止"}
     
     manager = get_strategy_manager()
-    success = await manager.stop_strategy(strategy_id)
+    success = await manager.stop_strategy(strategy_id, close_positions=close_positions)
     
     if not success:
         # 即使停止失败，也尝试更新数据库状态（修复状态不同步）
@@ -216,12 +226,12 @@ async def stop_strategy(strategy_id: int, db: Session = Depends(get_db)):
             db.rollback()
         raise HTTPException(status_code=500, detail="停止策略失败，但已尝试修复状态")
     
-    return {"message": "策略已停止"}
+    return {"message": "策略已停止" + ("，持仓已平仓" if close_positions else "")}
 
 
 @router.get("/{strategy_id}/status")
 async def get_strategy_status(strategy_id: int, db: Session = Depends(get_db)):
-    """获取策略状态"""
+    """获取策略状态（包含持仓信息和当前运行记录ID）"""
     strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
@@ -232,7 +242,84 @@ async def get_strategy_status(strategy_id: int, db: Session = Depends(get_db)):
     if not status:
         raise HTTPException(status_code=500, detail="获取策略状态失败")
     
+    # 获取当前运行记录ID（如果策略正在运行）
+    current_run_id = None
+    if strategy.status == StrategyStatus.RUNNING:
+        run = db.query(StrategyRun).filter(
+            StrategyRun.strategy_id == strategy_id,
+            StrategyRun.status == StrategyStatus.RUNNING
+        ).order_by(StrategyRun.started_at.desc()).first()
+        if run:
+            current_run_id = run.id
+    
+    status['current_run_id'] = current_run_id
+    
+    # 获取持仓信息
+    position_info = None
+    if strategy_id in manager.strategies:
+        try:
+            strategy_instance = manager.strategies[strategy_id]
+            exchange = strategy_instance.exchange
+            symbol = strategy_instance.symbol
+            
+            position = exchange.get_open_position(symbol)
+            if position:
+                contracts = abs(position.get('contracts', 0))
+                if contracts > 0:
+                    position_info = {
+                        'symbol': symbol,
+                        'side': position.get('side', ''),
+                        'contracts': contracts,
+                        'entry_price': position.get('entryPrice', 0),
+                        'current_price': position.get('markPrice') or position.get('lastPrice', 0),
+                        'unrealized_pnl': position.get('unrealizedPnl', 0),
+                        'unrealized_pnl_percent': position.get('unrealizedPnlPercent', 0),
+                    }
+        except Exception as e:
+            logger.warning(f"获取策略持仓信息失败: {e}")
+    
+    status['position'] = position_info
     return status
+
+
+@router.get("/runs/all")
+async def get_all_strategy_runs(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """获取所有策略的运行记录（历史策略）"""
+    from ..models.trade import Trade
+    from sqlalchemy import func
+    
+    runs = db.query(StrategyRun).join(Strategy).order_by(
+        StrategyRun.started_at.desc()
+    ).offset(skip).limit(limit).all()
+    
+    # 包含策略信息和计算的总盈亏
+    result = []
+    for run in runs:
+        # 计算该运行记录关联的所有交易的盈亏总和
+        # 只计算平仓交易的 pnl（因为开仓和加仓交易没有 pnl）
+        total_pnl = db.query(func.sum(Trade.pnl)).filter(
+            Trade.strategy_run_id == run.id,
+            Trade.pnl.isnot(None)  # 只计算有盈亏的交易（平仓交易）
+        ).scalar() or 0.0
+        
+        run_dict = {
+            "id": run.id,
+            "strategy_id": run.strategy_id,
+            "strategy_name": run.strategy.name if run.strategy else None,
+            "status": run.status.value if isinstance(run.status, StrategyStatus) else str(run.status),
+            "start_balance": run.start_balance,
+            "current_balance": run.current_balance,
+            "total_pnl": total_pnl,  # 通过交易记录计算的总盈亏
+            "total_trades": run.total_trades,
+            "win_trades": run.win_trades,
+            "loss_trades": run.loss_trades,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "stopped_at": run.stopped_at.isoformat() if run.stopped_at else None,
+            "error_message": run.error_message,
+        }
+        result.append(run_dict)
+    
+    return result
 
 
 @router.get("/{strategy_id}/runs")

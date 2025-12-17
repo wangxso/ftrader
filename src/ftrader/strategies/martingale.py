@@ -123,9 +123,82 @@ class MartingaleStrategy(BaseStrategy):
         
         return True
     
-    async def stop(self) -> bool:
-        """停止策略（异步）"""
+    async def stop(self, close_positions: bool = True) -> bool:
+        """
+        停止策略（异步）
+        
+        Args:
+            close_positions: 是否在停止前平仓，默认为True
+            
+        Returns:
+            是否成功停止
+        """
         logger.info("停止策略")
+        
+        # 如果设置了平仓，先检查并平仓
+        if close_positions:
+            try:
+                loop = asyncio.get_event_loop()
+                # 检查是否有持仓
+                position = await loop.run_in_executor(
+                    None,
+                    self.exchange.get_open_position,
+                    self.symbol
+                )
+                
+                if position is not None:
+                    contracts = abs(position.get('contracts', 0))
+                    if contracts > 0:
+                        logger.info(f"停止策略前发现持仓: {contracts} 合约，正在平仓...")
+                        current_price = await self.get_current_price()
+                        if current_price:
+                            # 平仓
+                            closed = await loop.run_in_executor(
+                                None,
+                                self.exchange.close_position,
+                                self.symbol
+                            )
+                            
+                            if closed:
+                                logger.info("停止策略前平仓成功")
+                                
+                                # 计算盈亏
+                                balance = await loop.run_in_executor(None, self.exchange.get_balance)
+                                pnl = None
+                                pnl_percent = None
+                                if balance and self.risk_manager.entry_balance > 0:
+                                    pnl = balance['total'] - self.risk_manager.entry_balance
+                                    pnl_percent = (pnl / self.risk_manager.entry_balance) * 100
+                                
+                                # 记录交易
+                                self.record_trade(
+                                    trade_type='close',
+                                    side=self.position_side,
+                                    symbol=self.symbol,
+                                    price=current_price,
+                                    amount=0,
+                                    pnl=pnl,
+                                    order_id='',
+                                    close_reason='策略停止'
+                                )
+                                
+                                logger.info(
+                                    f"平仓完成: 价格 {current_price:.4f}, "
+                                    f"盈亏 {pnl:.2f} USDT ({pnl_percent:.2f}%)" 
+                                    if pnl is not None else "平仓完成"
+                                )
+                            else:
+                                logger.warning("停止策略前平仓失败，但继续停止策略")
+                        else:
+                            logger.warning("无法获取当前价格，跳过平仓")
+                    else:
+                        logger.info("停止策略时无持仓，无需平仓")
+                else:
+                    logger.info("停止策略时无持仓，无需平仓")
+            except Exception as e:
+                logger.error(f"停止策略时平仓失败: {e}", exc_info=True)
+                # 即使平仓失败，也继续停止策略
+        
         self.is_active = False
         return True
     
