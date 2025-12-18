@@ -278,7 +278,7 @@ async def get_strategy_positions(strategy_id: int, db: Session = Depends(get_db)
         return []
 
 
-@router.get("/history", response_model=List[TradeResponse])
+@router.get("/history")
 async def get_trade_history(
     strategy_id: Optional[int] = None,
     strategy_run_id: Optional[int] = None,
@@ -286,7 +286,7 @@ async def get_trade_history(
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """获取交易历史"""
+    """获取交易历史（带总数）"""
     try:
         query = db.query(Trade)
         
@@ -297,12 +297,23 @@ async def get_trade_history(
         if strategy_run_id:
             query = query.filter(Trade.strategy_run_id == strategy_run_id)
         
+        # 获取总数
+        total = query.count()
+        
+        # 获取分页数据（按交易时间从大到小排序）
         trades = query.order_by(Trade.executed_at.desc()).offset(skip).limit(limit).all()
-        logger.debug(f"查询到 {len(trades)} 条交易记录 (strategy_id={strategy_id}, strategy_run_id={strategy_run_id}, skip={skip}, limit={limit})")
-        return trades
+        logger.debug(f"查询到 {len(trades)} 条交易记录，总共 {total} 条 (strategy_id={strategy_id}, strategy_run_id={strategy_run_id}, skip={skip}, limit={limit})")
+        
+        # 返回数据和总数
+        return {
+            'items': trades,
+            'total': total,
+            'skip': skip,
+            'limit': limit
+        }
     except Exception as e:
         logger.error(f"获取交易历史失败: {e}", exc_info=True)
-        return []
+        return {'items': [], 'total': 0, 'skip': skip, 'limit': limit}
 
 
 @router.get("/snapshots")

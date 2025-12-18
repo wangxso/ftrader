@@ -68,21 +68,58 @@
       <template #header>
         <span>交易历史</span>
       </template>
-      <el-table :data="trades" style="width: 100%">
-        <el-table-column prop="symbol" label="交易对" />
-        <el-table-column prop="trade_type" label="类型" />
-        <el-table-column prop="side" label="方向" />
-        <el-table-column prop="price" label="价格" />
-        <el-table-column prop="amount" label="数量" />
-        <el-table-column prop="pnl" label="盈亏">
+      <el-table 
+        :data="trades" 
+        style="width: 100%"
+        v-loading="tradesLoading"
+      >
+        <el-table-column prop="symbol" label="交易对" width="120" />
+        <el-table-column prop="trade_type" label="类型" width="100">
+          <template #default="{ row }">
+            {{ row.trade_type === 'open' ? '开仓' : row.trade_type === 'close' ? '平仓' : '加仓' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="side" label="方向" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.side === 'long' ? 'success' : 'danger'" size="small">
+              {{ row.side === 'long' ? '做多' : '做空' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="price" label="价格" width="120">
+          <template #default="{ row }">
+            {{ row.price ? row.price.toFixed(2) : '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="amount" label="数量" width="120">
+          <template #default="{ row }">
+            {{ row.amount ? row.amount.toFixed(4) : '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="pnl" label="盈亏" width="120">
           <template #default="{ row }">
             <span :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">
-              {{ row.pnl ? formatCurrency(row.pnl) : '-' }}
+              {{ row.pnl !== null && row.pnl !== undefined ? formatCurrency(row.pnl) : '-' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="executed_at" label="执行时间" />
+        <el-table-column prop="executed_at" label="执行时间" width="180">
+          <template #default="{ row }">
+            {{ formatDateTime(row.executed_at) }}
+          </template>
+        </el-table-column>
       </el-table>
+      <div style="margin-top: 20px; display: flex; justify-content: center;">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[20, 50, 100]"
+          :total="totalTrades"
+          layout="total, sizes, prev, pager, next, jumper"
+          @size-change="handleSizeChange"
+          @current-change="handlePageChange"
+        />
+      </div>
     </el-card>
   </div>
 </template>
@@ -101,12 +138,35 @@ const profitChartRef = ref<HTMLDivElement>()
 let profitChart: echarts.ECharts | null = null
 const chartLoading = ref(false)
 
+// 分页相关
+const currentPage = ref(1)
+const pageSize = ref(20)
+const totalTrades = ref(0)
+const tradesLoading = ref(false)
+
 const formatCurrency = (value: number) => {
   return new Intl.NumberFormat('zh-CN', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
   }).format(value)
+}
+
+const formatDateTime = (dateString: string) => {
+  if (!dateString) return '-'
+  try {
+    const date = new Date(dateString)
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return dateString
+  }
 }
 
 const initProfitChart = async () => {
@@ -157,20 +217,52 @@ const initProfitChart = async () => {
 
 const loading = ref(true)
 
+// 加载交易历史（带分页）
+const loadTrades = async () => {
+  try {
+    tradesLoading.value = true
+    const skip = (currentPage.value - 1) * pageSize.value
+    const result = await accountApi.getHistoryWithTotal(undefined, undefined, skip, pageSize.value)
+    
+    trades.value = result.items || []
+    totalTrades.value = result.total || 0
+  } catch (error: any) {
+    console.error('加载交易历史失败:', error)
+    trades.value = []
+    totalTrades.value = 0
+  } finally {
+    tradesLoading.value = false
+  }
+}
+
+// 处理分页大小变化
+const handleSizeChange = (newSize: number) => {
+  pageSize.value = newSize
+  currentPage.value = 1 // 重置到第一页
+  loadTrades()
+}
+
+// 处理页码变化
+const handlePageChange = (newPage: number) => {
+  currentPage.value = newPage
+  loadTrades()
+}
+
 const loadData = async () => {
   try {
     loading.value = true
     
-    // 并行加载主要数据
-    const [balanceData, positionsData, tradesData] = await Promise.all([
+    // 并行加载主要数据（不包括交易历史，因为需要分页）
+    const [balanceData, positionsData] = await Promise.all([
       accountApi.getBalance(),
       accountApi.getPositions(),
-      accountApi.getHistory(undefined, 0, 100)
     ])
     
     balance.value = balanceData
     positions.value = positionsData
-    trades.value = tradesData
+    
+    // 单独加载交易历史（带分页）
+    await loadTrades()
     
     // 图表数据异步加载，显示在图表card内的loading
     updateChartAsync()
@@ -219,7 +311,8 @@ onMounted(async () => {
   
   // 监听WebSocket消息
   wsClient.on('trade', () => {
-    loadData()
+    // 只刷新交易历史，不刷新其他数据
+    loadTrades()
   })
   
   // 定时刷新

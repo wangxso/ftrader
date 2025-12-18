@@ -19,7 +19,7 @@ export const accountApi = {
     return response.data
   },
 
-  // 获取交易历史
+  // 获取交易历史（带分页）
   getHistory: async (strategyId?: number, strategyRunId?: number, skip = 0, limit = 100) => {
     const params: any = { skip, limit }
     if (strategyId) {
@@ -29,6 +29,32 @@ export const accountApi = {
       params.strategy_run_id = strategyRunId
     }
     const response = await apiClient.get('/account/history', { params })
+    // 兼容旧版本API（直接返回数组）和新版本API（返回对象）
+    if (Array.isArray(response.data)) {
+      return response.data
+    }
+    return response.data.items || []
+  },
+  
+  // 获取交易历史（带总数）
+  getHistoryWithTotal: async (strategyId?: number, strategyRunId?: number, skip = 0, limit = 100) => {
+    const params: any = { skip, limit }
+    if (strategyId) {
+      params.strategy_id = strategyId
+    }
+    if (strategyRunId) {
+      params.strategy_run_id = strategyRunId
+    }
+    const response = await apiClient.get('/account/history', { params })
+    // 兼容旧版本API（直接返回数组）
+    if (Array.isArray(response.data)) {
+      return {
+        items: response.data,
+        total: response.data.length,
+        skip,
+        limit
+      }
+    }
     return response.data
   },
 
